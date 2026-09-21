@@ -1,0 +1,56 @@
+name: Dev Agent
+
+on:
+  workflow_call:
+    inputs:
+      extra_allowed_tools:
+        description: >-
+          Space-separated allowedTools patterns specific to the calling repo's
+          stack (its test/lint/build commands), appended to the common git/gh
+          set below.
+        required: true
+        type: string
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model claude-opus-5
+            --max-turns 40
+            --allowedTools "Bash(git fetch:*) Bash(git checkout:*) Bash(git switch:*) Bash(git add:*) Bash(git commit:*) Bash(git push:*) Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(git branch:*) Bash(gh pr create:*) Bash(gh pr view:*) Bash(gh pr checks:*) ${{ inputs.extra_allowed_tools }}"
+          prompt: |
+            Read issue #${{ github.event.issue.number }} ("${{ github.event.issue.title }}"), the
+            event that triggered this run, including its full body, to understand what is being
+            asked.
+
+            Before writing any code, read this repository's CLAUDE.md for the branch naming
+            convention, the commit message format, and the branch flow (which branch a pull
+            request should target).
+
+            Then:
+            1. Create a new branch off `dev` following CLAUDE.md's naming convention. Never branch
+               from or push directly to `main`, `dev`, or `stg`.
+            2. Implement a solution for the issue.
+            3. Run this repository's tests, lint, and build locally (see CLAUDE.md for the exact
+               commands). Fix anything that fails before continuing.
+            4. Commit the changes following this repository's commit convention from CLAUDE.md.
+            5. Push the branch.
+            6. Open a pull request targeting `dev`, referencing issue #${{ github.event.issue.number }}
+               in the description. Never push directly to `main`, `dev`, or `stg`.
