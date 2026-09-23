@@ -2,7 +2,7 @@
 <!-- dev-agent:start -->
 ## Dev agent (`dev-agent.yml`)
 
-El dev agent de Lúmina W vive **una sola vez** en este repo. Cada repo de código tiene solo un `claude.yml` corto que lo llama con un tag fijo (`@v3`) y le pasa lo que es propio del repo. No hay copias de la lógica en los repos.
+El dev agent de Lúmina W vive **una sola vez** en este repo. Cada repo de código tiene solo un `claude.yml` corto que lo llama con un tag fijo (`@v4`) y le pasa lo que es propio del repo. No hay copias de la lógica en los repos.
 
 ### Qué hace y qué no
 
@@ -28,10 +28,10 @@ issue + label ──> dev agent ──> PR a dev ──> CI ──(verde)──>
 
 | Evento | Modo | Modelo por defecto | Turnos |
 |---|---|---|---|
-| Label `dev-ft-ready` en un issue | implement | `claude-opus-5` | 40 |
+| Label `dev-ft-ready` en un issue | implement | `claude-opus-5-5` | 40 |
 | Label `dev-ft-small` en un issue (tareas pequeñas) | implement | `claude-sonnet-5` | 20 |
 | Comentario con `@claude` en un PR | iterate | `claude-sonnet-5` | 20 |
-| El workflow `CI` falla en un PR con label `dev-agent` | fix | `claude-opus-5` | 40 |
+| El workflow `CI` falla en un PR con label `dev-agent` | fix | `claude-opus-5-5` | 40 |
 
 Reglas del disparo:
 
@@ -52,7 +52,7 @@ Reglas del disparo:
 | 5 | Comandos | Solo puede correr los comandos de "tarea terminada" del `CLAUDE.md` del repo más unos pocos extra (formatear, un test puntual). Primero el más acotado; la lista completa una vez antes de cada push |
 | 6 | Bloqueos | Deniega merge, force push, push a `dev`/`stg`/`main`, `reset --hard` y lectura de `.env` |
 | 7 | Retroalimentación | Espera los checks del PR; si el CI falla después, el modo fix lo retoma |
-| 8 | Checkpoint | Actualiza el checkpoint del repo (`.claude/CHECKPOINT.md` por defecto) en el mismo PR |
+| 8 | Checkpoint | Actualiza `.claude/CHECKPOINT.md` en el mismo PR. Si el repo aún lo tiene en la raíz, lo mueve a `.claude/` con `git mv`. Es el mismo archivo que leen el hook `SessionStart`, el comando `/checkpoint` y el sync de docs |
 
 La protección de ramas de GitHub sigue siendo la barrera real contra pushes a ramas protegidas; los bloqueos del agente son una segunda capa.
 
@@ -74,7 +74,7 @@ jobs:
       (github.event_name == 'issues' && (github.event.label.name == 'dev-ft-ready' || github.event.label.name == 'dev-ft-small')) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'failure')
-    uses: lumina-w/agents/.github/workflows/dev-agent.yml@v3
+    uses: lumina-w/agents/.github/workflows/dev-agent.yml@v4
     permissions:
       contents: write
       pull-requests: write
@@ -107,9 +107,9 @@ jobs:
 | `extra_allowed_tools` | | | Reglas extra de Claude Code, una por línea (`Bash(npm run format)`) |
 | `context_files` | | | Docs del repo que debe leer además de `CLAUDE.md` y `AGENTS.md` |
 | `docs_repo` | | | Repo de docs del proyecto (`terracore-docs`, `okroot-docs`, `luminaw-docs`) |
-| `checkpoint_file` | | `.claude/CHECKPOINT.md` | Checkpoint que actualiza en cada PR |
+| `checkpoint_file` | | `.claude/CHECKPOINT.md` | Checkpoint que actualiza en cada PR (estándar de la org: dentro de `.claude/`) |
 | `base_branch` | | `dev` | Rama de la que parte y a la que abre el PR |
-| `model` / `small_model` | | `claude-opus-5` / `claude-sonnet-5` | Modelo normal y el de `dev-ft-small` e iterate |
+| `model` / `small_model` | | `claude-opus-5-5` / `claude-sonnet-5` | Modelo normal y el de `dev-ft-small` e iterate |
 | `max_turns` / `small_max_turns` | | `40` / `20` | Turnos por modo |
 | `max_fix_rounds` | | `2` | Rondas máximas del modo fix |
 | `timeout_minutes` | | `30` | Límite del job |
@@ -119,7 +119,7 @@ jobs:
 | Secret | Obligatorio | Visible para | Uso |
 |---|---|---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | sí | Todos los repos de código | Autenticación de Claude |
-| `PROJECT_DOCS_READ_TOKEN` | no | Todos los repos de código | Leer `<proyecto>-docs`. Fine-grained PAT, repos `terracore-docs`, `okroot-docs`, `luminaw-docs`, Contents: Read-only. Sin él, el agente trabaja sin contexto de producto |
+| `DOCS_SOURCES_READ_TOKEN` | no | Repos de código y repos `*-docs` | Token de solo lectura de la organización (fine-grained PAT, Contents: Read-only) sobre los repos de código, `agents` y los 3 `*-docs`. El sync lo usa para leer el código; el agente, para leer `<proyecto>-docs`. Sin él, el agente trabaja sin contexto de producto |
 | `PROMOTE_TOKEN` | para auto-merge | Repos con `automerge-dev` | Arma el auto-merge; el push a `dev` resultante dispara los workflows del repo |
 
 ### Repos que lo usan
@@ -145,7 +145,7 @@ jobs:
 
 ### Versionado
 
-Los callers apuntan a un tag (`@v3`), nunca a `main`. Cambio en un workflow compartido: PR a este repo, merge, tag nuevo, y PR en cada caller para subir el tag. Así un cambio nunca llega a todos los repos sin revisión.
+Los callers apuntan a un tag (`@v4`), nunca a `main`. Cambio en un workflow compartido: PR a este repo, merge, tag nuevo, y PR en cada caller para subir el tag. Así un cambio nunca llega a todos los repos sin revisión.
 
 ### Probarlo
 
