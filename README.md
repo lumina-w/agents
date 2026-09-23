@@ -28,10 +28,10 @@ issue + label ──> dev agent ──> PR a dev ──> CI ──(verde)──>
 
 | Evento | Modo | Modelo por defecto | Turnos |
 |---|---|---|---|
-| Label `dev-ft-ready` en un issue | implement | `claude-opus-5-5` | 40 |
-| Label `dev-ft-small` en un issue (tareas pequeñas) | implement | `claude-sonnet-5` | 20 |
-| Comentario con `@claude` en un PR | iterate | `claude-sonnet-5` | 20 |
-| El workflow `CI` falla en un PR con label `dev-agent` | fix | `claude-opus-5-5` | 40 |
+| Label `dev-ft-ready` en un issue | implement | `opus` | 40 |
+| Label `dev-ft-small` en un issue (tareas pequeñas) | implement | `sonnet` | 20 |
+| Comentario con `@claude` en un PR | iterate | `sonnet` | 20 |
+| El workflow `CI` falla en un PR con label `dev-agent` | fix | `opus` | 40 |
 
 Reglas del disparo:
 
@@ -109,7 +109,7 @@ jobs:
 | `docs_repo` | | | Repo de docs del proyecto (`terracore-docs`, `okroot-docs`, `luminaw-docs`) |
 | `checkpoint_file` | | `.claude/CHECKPOINT.md` | Checkpoint que actualiza en cada PR (estándar de la org: dentro de `.claude/`) |
 | `base_branch` | | `dev` | Rama de la que parte y a la que abre el PR |
-| `model` / `small_model` | | `claude-opus-5-5` / `claude-sonnet-5` | Modelo normal y el de `dev-ft-small` e iterate |
+| `model` / `small_model` | | `opus` / `sonnet` | Modelo normal y el de `dev-ft-small` e iterate |
 | `max_turns` / `small_max_turns` | | `40` / `20` | Turnos por modo |
 | `max_fix_rounds` | | `2` | Rondas máximas del modo fix |
 | `timeout_minutes` | | `30` | Límite del job |
@@ -132,7 +132,7 @@ jobs:
 | okroot-back | Python 3.12 | lint, ruff format --check, test, makemigrations --check | okroot-docs |
 | okroot-front | pnpm, Node 20 | typecheck, lint, test, build | okroot-docs |
 | okroot-page | npm, Node 22 | lint (astro check), build | okroot-docs |
-| blogw-front | npm, Node 20 | lint, build | luminaw-docs |
+| blog-w | npm, Node 20 | lint, build | luminaw-docs |
 | luminaw-page | npm, `.nvmrc` | format:check, build | luminaw-docs |
 
 ### Otros workflows compartidos de este repo
@@ -153,3 +153,22 @@ Los callers apuntan a un tag (`@v4`), nunca a `main`. Cambio en un workflow comp
 2. Revisa la ejecución en Actions del repo (job `claude / agent`).
 3. El PR debe llegar con label `dev-agent`, checkpoint actualizado y solo los checks marcados que corrió.
 <!-- dev-agent:end -->
+
+<!-- docs-sync:start -->
+## Docs sync (`docs-sync.yml`)
+
+Mantiene al día los repos `lumina-w/<proyecto>-docs` desde la rama `dev` de los repos de cada proyecto. Cada repo de docs tiene un caller corto (`docs-daily-sync.yml`, 06:00 COT) y su `docs-sync.config.yml` (repos fuente, docs gestionados y protegidos, día de auditoría completa, carpeta de Drive).
+
+| Caso | Qué pasa | Modelo |
+|---|---|---|
+| Sin commits nuevos | No corre nada | |
+| Solo dependencias (Dependabot, lockfiles) | Changelog y estado por script | |
+| Commits de código | Script: `changelog` (desde `git log`) y `checkpoint` (desde `.claude/CHECKPOINT.md`). Claude recibe `_changes.md` con el diff y actualiza solo los docs afectados | `sonnet`, 40 turnos |
+| Auditoría completa: `full_audit_weekday` (domingo por defecto), primer sync de un repo o `force=true` | Claude revisa todos los docs gestionados | `opus`, 150 turnos |
+
+- Los alias `opus` y `sonnet` resuelven al modelo más reciente que permita `CLAUDE_CODE_OAUTH_TOKEN` (hoy `opus` = `claude-opus-5`).
+- Inputs opcionales: `model` y `max_turns` para forzar valores en cualquier modo.
+- Guardas: solo `.md` de la raíz del repo de docs; Claude no puede tocar `changelog`, `checkpoint` ni docs protegidos; un archivo por tipo.
+- Publicación: PR con auto-merge, o push directo a `main` del repo de docs si la empresa no deja a Actions crear PRs.
+- Espejo a Drive opcional (`mirror.drive_folder_id`), requiere la API de Drive activa en el proyecto de GCP de la cuenta de servicio. Si falla, deja aviso y no tumba la corrida.
+<!-- docs-sync:end -->

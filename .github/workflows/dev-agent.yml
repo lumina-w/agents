@@ -81,11 +81,11 @@ on:
         default: dev
       model:
         type: string
-        default: claude-opus-5-5
+        default: opus
       small_model:
         description: Model for issues labeled dev-ft-small and for iterate mode
         type: string
-        default: claude-sonnet-5
+        default: sonnet
       max_turns:
         type: number
         default: 40
