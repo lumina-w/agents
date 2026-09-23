@@ -23,7 +23,8 @@
 #
 # Secrets (org level, `secrets: inherit`):
 #   CLAUDE_CODE_OAUTH_TOKEN   required
-#   PROJECT_DOCS_READ_TOKEN   optional, read-only on lumina-w/<project>-docs
+#   DOCS_SOURCES_READ_TOKEN   optional, read-only token of the org (also used by docs-sync);
+#                             must include lumina-w/<project>-docs
 
 name: Dev agent (reusable)
 
@@ -80,7 +81,7 @@ on:
         default: dev
       model:
         type: string
-        default: claude-opus-5
+        default: claude-opus-5-5
       small_model:
         description: Model for issues labeled dev-ft-small and for iterate mode
         type: string
@@ -100,7 +101,7 @@ on:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
-      PROJECT_DOCS_READ_TOKEN:
+      DOCS_SOURCES_READ_TOKEN:
         required: false
 
 jobs:
@@ -223,11 +224,11 @@ jobs:
         id: docs
         if: steps.mode.outputs.mode != 'skip' && inputs.docs_repo != ''
         env:
-          TOKEN: ${{ secrets.PROJECT_DOCS_READ_TOKEN }}
+          TOKEN: ${{ secrets.DOCS_SOURCES_READ_TOKEN }}
           DOCS_REPO: ${{ inputs.docs_repo }}
         run: |
           set -euo pipefail
-          if [ -z "$TOKEN" ]; then echo "Sin PROJECT_DOCS_READ_TOKEN: se omite el contexto de producto."; exit 0; fi
+          if [ -z "$TOKEN" ]; then echo "Sin DOCS_SOURCES_READ_TOKEN: se omite el contexto de producto."; exit 0; fi
           dir="$RUNNER_TEMP/project-docs"
           git clone --quiet --depth 1 "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/${DOCS_REPO}.git" "$dir"
           rm -rf "$dir/.git"
@@ -259,6 +260,7 @@ jobs:
           Bash(git switch -c:*)
           Bash(git switch:*)
           Bash(git add:*)
+          Bash(git mv:*)
           Bash(git commit:*)
           Bash(git push)
           Bash(git push -u origin:*)
@@ -332,7 +334,7 @@ jobs:
             ## Flow
             1. implement: branch off an up-to-date `${{ inputs.base_branch }}` with the naming convention from CLAUDE.md. iterate/fix: stay on the PR branch, never create another one.
             2. Make the smallest change that solves the task. No unrelated refactors.
-            3. Update `${{ inputs.checkpoint_file }}` in the same change: current state, what this change did, what is pending. If `.claude/commands/checkpoint.md` exists, follow its format. Update other repo docs only when CLAUDE.md requires it for this kind of change.
+            3. Update `${{ inputs.checkpoint_file }}` in the same change: current state, what this change did, what is pending. If it does not exist but a `CHECKPOINT.md` exists at the repo root, move it there with `git mv` first (the org keeps checkpoints in `.claude/`). If `.claude/commands/checkpoint.md` exists, follow its format. Update other repo docs only when CLAUDE.md requires it for this kind of change.
             4. Commit with the repo's commit convention and push only the working branch.
             5. implement: open a non-draft PR against `${{ inputs.base_branch }}` with `--label dev-agent`, referencing #${{ steps.mode.outputs.number }}, with the body sections CLAUDE.md requires. Mark as done only what you ran and saw pass; list the rest under "Not verified". iterate/fix: comment on the PR what you changed and why.
             6. Your job ends at the PR. Merging into `${{ inputs.base_branch }}`, branch deletion and promotions are handled by the repo's workflows and people. Never merge, never push to `dev`, `stg` or `main`, never force push, never read `.env` files.

@@ -31,7 +31,11 @@ on:
         default: true
       model:
         type: string
-        default: claude-opus-5
+        default: claude-opus-5-5
+      max_turns:
+        description: The first full sync of a project can need well over 80 turns
+        type: number
+        default: 150
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -119,7 +123,7 @@ jobs:
           github_token: ${{ github.token }}
           claude_args: |
             --model ${{ inputs.model }}
-            --max-turns 80
+            --max-turns ${{ inputs.max_turns }}
             --add-dir ${{ steps.sources.outputs.dir }}
             --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git -C:*)" "Bash(git mv:*)" "Bash(git rm:*)" "Bash(git status:*)" "Bash(ls:*)" "Bash(date:*)"
           prompt: |
