@@ -1,0 +1,225 @@
+# Reusable workflow: Claude dev agent for any Lumina W repo.
+#
+# Each repo keeps only a thin .github/workflows/claude.yml that triggers on the
+# `dev-ft-ready` issue label and calls this workflow pinned to a tag. The caller
+# passes what is specific to the repo; everything else lives here once.
+#
+# Layers:
+#   1. Trigger guard   only users with write access can start a run; one run per issue
+#   2. Toolchain       python | npm | pnpm with the repo's versions, deps preinstalled
+#   3. Environment     repo env vars for local checks (never secrets)
+#   4. Context         CLAUDE.md, AGENTS.md and extra docs the repo lists
+#   5. Commands        verify commands from the repo's done criteria + extras; nothing else
+#   6. Guardrails      no force push, no merge, no push to dev/stg/main, no .env reads
+#   7. Feedback        waits for PR checks and fixes at most twice
+#
+# Secret: CLAUDE_CODE_OAUTH_TOKEN (org level, passed with `secrets: inherit`).
+
+name: Dev agent (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      toolchain:
+        description: "python | npm | pnpm | none"
+        type: string
+        required: true
+      python_version:
+        type: string
+        default: ""
+      python_cache_path:
+        description: Requirements file used as pip cache key
+        type: string
+        default: ""
+      node_version:
+        type: string
+        default: ""
+      node_version_file:
+        description: e.g. .nvmrc (used when node_version is empty)
+        type: string
+        default: ""
+      install_command:
+        description: Installs dependencies before the agent starts, e.g. "npm ci"
+        type: string
+        default: ""
+      env_vars:
+        description: KEY=value per line for local checks (no secrets), e.g. DJANGO_SETTINGS_MODULE=config.settings.test
+        type: string
+        default: ""
+      verify_commands:
+        description: Done-criteria commands from the repo's CLAUDE.md, one per line. Allowed and run before pushing
+        type: string
+        required: true
+      extra_allowed_tools:
+        description: Other Claude Code permission rules, one per line, e.g. Bash(npm run format)
+        type: string
+        default: ""
+      context_files:
+        description: Extra docs the agent must read besides CLAUDE.md and AGENTS.md, one per line
+        type: string
+        default: ""
+      base_branch:
+        type: string
+        default: dev
+      max_turns:
+        type: number
+        default: 40
+      model:
+        type: string
+        default: claude-opus-5
+      timeout_minutes:
+        type: number
+        default: 30
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: dev-agent-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      # 1. Trigger guard
+      - name: Check who triggered the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" -q .permission)
+          case "$perm" in
+            admin|maintain|write) echo "Autorizado: $ACTOR ($perm)";;
+            *) echo "::error::$ACTOR ($perm) no puede disparar el dev agent"; exit 1;;
+          esac
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # 2. Toolchain
+      - name: Set up Python
+        if: inputs.toolchain == 'python'
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: ${{ inputs.python_cache_path != '' && 'pip' || '' }}
+          cache-dependency-path: ${{ inputs.python_cache_path }}
+
+      - name: Set up pnpm
+        if: inputs.toolchain == 'pnpm'
+        uses: pnpm/action-setup@v6.1.0
+
+      - name: Set up Node.js
+        if: inputs.toolchain == 'npm' || inputs.toolchain == 'pnpm'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node_version }}
+          node-version-file: ${{ inputs.node_version == '' && inputs.node_version_file || '' }}
+          cache: ${{ inputs.toolchain }}
+
+      # 3. Environment
+      - name: Export repo env vars
+        if: inputs.env_vars != ''
+        env:
+          ENV_VARS: ${{ inputs.env_vars }}
+        run: printf '%s\n' "$ENV_VARS" | sed 's/^[[:space:]]*//' | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        if: inputs.install_command != ''
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+        run: bash -c "$INSTALL_COMMAND"
+
+      # 5. Commands (and 4. context list for the prompt)
+      - name: Build allowlist and context
+        id: prep
+        env:
+          VERIFY: ${{ inputs.verify_commands }}
+          EXTRA: ${{ inputs.extra_allowed_tools }}
+          CONTEXT: ${{ inputs.context_files }}
+        run: |
+          set -euo pipefail
+          clean() { sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true; }
+          base='Edit
+          Write
+          Bash(git fetch:*)
+          Bash(git checkout -b:*)
+          Bash(git switch -c:*)
+          Bash(git switch:*)
+          Bash(git add:*)
+          Bash(git commit:*)
+          Bash(git push -u origin:*)
+          Bash(git status:*)
+          Bash(git diff:*)
+          Bash(git log:*)
+          Bash(git branch:*)
+          Bash(gh issue view:*)
+          Bash(gh pr create:*)
+          Bash(gh pr view:*)
+          Bash(gh pr checks:*)
+          Bash(gh pr comment:*)
+          Bash(gh run view:*)'
+          verify_rules=$(printf '%s\n' "$VERIFY" | clean | sed 's/.*/Bash(&)/')
+          {
+            printf '%s\n' "$base" | clean
+            printf '%s\n' "$verify_rules"
+            printf '%s\n' "$EXTRA" | clean
+          } | awk '!seen[$0]++' | sed 's/.*/"&"/' | tr '\n' ' ' > "$RUNNER_TEMP/allowed"
+          echo "allowed=$(cat "$RUNNER_TEMP/allowed")" >> "$GITHUB_OUTPUT"
+          {
+            echo 'verify<<EOF_VERIFY'
+            printf '%s\n' "$VERIFY" | clean | sed 's/.*/- `&`/'
+            echo 'EOF_VERIFY'
+            echo 'context<<EOF_CONTEXT'
+            for f in CLAUDE.md AGENTS.md $(printf '%s\n' "$CONTEXT" | clean); do
+              if [ -f "$f" ]; then echo "- \`$f\`"; fi
+            done
+            echo 'EOF_CONTEXT'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools ${{ steps.prep.outputs.allowed }}
+            --disallowedTools "Bash(git push --force:*)" "Bash(git push -f:*)" "Bash(git push origin main:*)" "Bash(git push origin stg:*)" "Bash(git push origin dev:*)" "Bash(git push -u origin main:*)" "Bash(git push -u origin stg:*)" "Bash(git push -u origin dev:*)" "Bash(git reset --hard:*)" "Bash(gh pr merge:*)" "Read(**/.env)" "Read(**/.env.local)" "Read(**/.env.stg)" "Read(**/.env.production)"
+          prompt: |
+            You are the dev agent of this repository. Your task is issue #${{ github.event.issue.number }}: read it with `gh issue view ${{ github.event.issue.number }} --comments`.
+
+            ## Context (read before touching code)
+            ${{ steps.prep.outputs.context }}
+            These files define the stack, versions, conventions, branch flow, commit format, PR format and done criteria. They win over any general habit. If the issue contradicts them, follow them and say so in the PR.
+
+            ## Environment
+            - Toolchain `${{ inputs.toolchain }}` is set up and dependencies are already installed. Do not reinstall them.
+            - Do not start dev servers, watchers or anything long-running.
+
+            ## Done criteria (the only verification commands you may run)
+            ${{ steps.prep.outputs.verify }}
+            Run the narrowest relevant one first while iterating (for example a single test file when the command accepts a path). Before pushing, run the full list once. Do not run commands that are not needed for this change.
+
+            ## Flow
+            1. Branch off an up-to-date `${{ inputs.base_branch }}` with the naming convention from CLAUDE.md.
+            2. Implement the smallest change that solves the issue. No unrelated refactors.
+            3. Update docs in the repo only when CLAUDE.md requires it for this kind of change.
+            4. Commit with the repo's commit convention and push only your branch.
+            5. Open a non-draft PR against `${{ inputs.base_branch }}` referencing #${{ github.event.issue.number }}, with the body sections CLAUDE.md requires. Mark as done only what you ran and saw pass; list the rest under "Not verified".
+            6. Wait for the PR checks with `gh pr checks <number> --watch`. If a required check fails because of your change, fix it and push. At most two fix rounds; if it still fails, stop and explain in a PR comment.
+            7. Never merge, never push to `dev`, `stg` or `main`, never force push, never read `.env` files.
+
+      - name: Summary
+        if: always()
+        run: echo "Dev agent para #${{ github.event.issue.number }} terminó con estado ${{ job.status }}." >> "$GITHUB_STEP_SUMMARY"
