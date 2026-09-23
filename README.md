@@ -141,7 +141,7 @@ jobs:
 |---|---|
 | `automerge-dev.yml` | Arma auto-merge squash en PRs no-draft a `dev` (excluye forks y Dependabot). Requiere `dev` protegida con checks requeridos |
 | `delete-merged-branches.yml` | Borra ramas de PRs ya mergeados a `dev` (el caller lo agenda cada 12 h) |
-| `docs-sync.yml` | Sincroniza cada día `<proyecto>-docs` desde la rama `dev` de los repos del proyecto, con espejo a Drive |
+| `docs-sync.yml` | Sincroniza cada día `<proyecto>-docs` desde la rama `dev` de los repos del proyecto |
 
 ### Versionado
 
@@ -164,7 +164,7 @@ Rollback: mover `v4` al `v4.Y.Z` anterior. Los callers apuntan siempre al tag ma
 <!-- docs-sync:start -->
 ## Docs sync (`docs-sync.yml`)
 
-Mantiene al día los repos `lumina-w/<proyecto>-docs` desde la rama `dev` de los repos de cada proyecto. Cada repo de docs tiene un caller corto (`docs-daily-sync.yml`, 06:00 COT) y su `docs-sync.config.yml` (repos fuente, docs gestionados y protegidos, día de auditoría completa, carpeta de Drive).
+Mantiene al día los repos `lumina-w/<proyecto>-docs` desde la rama `dev` de los repos de cada proyecto. Cada repo de docs tiene un caller corto (`docs-daily-sync.yml`, escalonado: terracore 06:00, okroot 06:20, luminaw 06:40 COT) y su `docs-sync.config.yml` (repos fuente, docs gestionados y protegidos, día de auditoría completa).
 
 | Caso | Qué pasa | Modelo |
 |---|---|---|
@@ -177,5 +177,5 @@ Mantiene al día los repos `lumina-w/<proyecto>-docs` desde la rama `dev` de los
 - Inputs opcionales: `model` y `max_turns` para forzar valores en cualquier modo.
 - Guardas: solo `.md` de la raíz del repo de docs; Claude no puede tocar `changelog`, `checkpoint` ni docs protegidos; un archivo por tipo.
 - Publicación: PR con auto-merge, o push directo a `main` del repo de docs si la empresa no deja a Actions crear PRs.
-- Espejo a Drive opcional (`mirror.drive_folder_id`), requiere la API de Drive activa en el proyecto de GCP de la cuenta de servicio. Si falla, deja aviso y no tumba la corrida.
+- Sin espejo a Drive (retirado el 2026-09-23): los docs viven solo en GitHub y en local.
 <!-- docs-sync:end -->
