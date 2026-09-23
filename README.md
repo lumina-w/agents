@@ -145,7 +145,14 @@ jobs:
 
 ### Versionado
 
-Los callers apuntan a un tag (`@v4`), nunca a `main`. Cambio en un workflow compartido: PR a este repo, merge, tag nuevo, y PR en cada caller para subir el tag. Así un cambio nunca llega a todos los repos sin revisión.
+Cada cambio mergeado en `agents` lleva un tag inmutable `v4.Y.Z` y mueve el tag mayor `v4` a ese commit (mismo esquema que las actions oficiales de GitHub).
+
+| Tipo de cambio | Ejemplos | Qué se hace | Callers |
+|---|---|---|---|
+| Compatible | Arreglo, quitar un paso, input o secret opcional nuevo | Tag `v4.Y.Z` y mover `v4` | No cambian |
+| Rompe callers | Input o secret requerido nuevo, renombrar o quitar un input | Tag mayor nuevo (`v5`, `v5.0.0`) | PR en cada caller para subir a `@v5` |
+
+Rollback: mover `v4` al `v4.Y.Z` anterior. Los callers apuntan siempre al tag mayor, nunca a `main`.
 
 ### Probarlo
 
