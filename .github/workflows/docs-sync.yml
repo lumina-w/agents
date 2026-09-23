@@ -20,7 +20,6 @@
 # Secrets (org level, `secrets: inherit`):
 #   CLAUDE_CODE_OAUTH_TOKEN     required
 #   DOCS_SOURCES_READ_TOKEN     required, read-only on the source repos
-#   GOOGLE_SERVICE_ACCOUNT_KEY  optional, read-only Drive mirror
 
 name: Docs sync (reusable)
 
@@ -50,8 +49,6 @@ on:
         required: true
       DOCS_SOURCES_READ_TOKEN:
         required: true
-      GOOGLE_SERVICE_ACCOUNT_KEY:
-        required: false
 
 jobs:
   sync:
@@ -88,7 +85,6 @@ jobs:
             echo "org=$(jq -r '.org' "$c")"
             echo "today=$(TZ="$TZ_NAME" date +%F)"
             echo "protected=$(jq -r '(.docs.protected // []) | join(", ")' "$c")"
-            echo "drive_folder_id=$(jq -r '.mirror.drive_folder_id // ""' "$c")"
             echo "full=$full"
           } >> "$GITHUB_OUTPUT"
 
@@ -355,55 +351,3 @@ jobs:
             echo "pushed=true" >> "$GITHUB_OUTPUT"
             { echo "Publicado directo en main."; echo; cat "$BODY"; } >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      # Read-only copy in Google Drive. A failure here only warns: the docs are
-      # already published.
-      - name: Mirror to Google Drive
-        continue-on-error: true
-        if: (steps.pr.outputs.url != '' || steps.pr.outputs.pushed == 'true') && steps.cfg.outputs.drive_folder_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_URL: ${{ steps.pr.outputs.url }}
-          FOLDER_ID: ${{ steps.cfg.outputs.drive_folder_id }}
-          SA_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
-          SOURCE_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [ -z "$SA_KEY" ]; then echo "Sin GOOGLE_SERVICE_ACCOUNT_KEY: espejo omitido." >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          if [ -n "$PR_URL" ]; then
-            state=OPEN
-            for i in 1 2 3 4 5 6; do
-              state=$(gh pr view "$PR_URL" --json state -q .state)
-              [ "$state" = "MERGED" ] && break
-              sleep 20
-            done
-            if [ "$state" != "MERGED" ]; then echo "PR sin mergear: espejo omitido." >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          fi
-          pip install --quiet google-api-python-client google-auth
-          python3 - <<'PY'
-          import glob, json, os
-          from google.oauth2 import service_account
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
-          creds = service_account.Credentials.from_service_account_info(
-              json.loads(os.environ["SA_KEY"]), scopes=["https://www.googleapis.com/auth/drive"])
-          drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-          folder = os.environ["FOLDER_ID"]
-          note = f"Copia de solo lectura. Fuente oficial: github.com/{os.environ['SOURCE_REPO']}"
-          existing = {}
-          q = f"'{folder}' in parents and trashed = false and mimeType = 'text/markdown'"
-          for f in drive.files().list(q=q, fields="files(id,name,owners(me))", pageSize=200).execute()["files"]:
-              existing[f["name"]] = f
-          local = sorted(p for p in glob.glob("*.md") if p != "README.md")
-          for name in local:
-              media = MediaFileUpload(name, mimetype="text/markdown")
-              if name in existing:
-                  drive.files().update(fileId=existing[name]["id"], media_body=media, body={"description": note}).execute()
-              else:
-                  drive.files().create(body={"name": name, "parents": [folder], "description": note}, media_body=media, fields="id").execute()
-          for name, f in existing.items():
-              if name not in local and any(o.get("me") for o in f.get("owners", [])):
-                  drive.files().delete(fileId=f["id"]).execute()
-          print(f"Espejo: {len(local)} docs en Drive")
-          PY
-          echo "Espejo en Drive actualizado." >> "$GITHUB_STEP_SUMMARY"
