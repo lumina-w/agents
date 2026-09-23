@@ -2,15 +2,25 @@
 #
 # Lives in lumina-w/agents and is called by a thin workflow in each
 # lumina-w/<project>-docs repo. It reads the source repos of the project
-# (read-only, branch from docs-sync.config.yml), lets Claude update the dated
-# markdown docs, and opens a PR against main in the docs repo.
+# (read-only, branch from docs-sync.config.yml) and keeps the dated markdown
+# docs of the docs repo current.
 #
-# Required secrets (org level recommended, passed with `secrets: inherit`):
-#   CLAUDE_CODE_OAUTH_TOKEN  Claude subscription token (claude setup-token)
-#   DOCS_SOURCES_READ_TOKEN  read-only token (contents: read) on the source repos
-# Optional:
-#   GOOGLE_SERVICE_ACCOUNT_KEY  service account JSON; enables the read-only Drive
-#                               mirror when the config sets mirror.drive_folder_id
+# Cost and time controls:
+#   - No new commits in any source repo: nothing runs.
+#   - Only dependency bumps (Dependabot, lockfiles): no Claude; changelog and
+#     state are updated by script.
+#   - changelog and checkpoint are always built by script (git log and each
+#     repo's .claude/CHECKPOINT.md), never by Claude.
+#   - Incremental run: Claude gets a precomputed diff (_changes.md) and the list
+#     of the only docs it may touch, on the `sonnet` alias with 40 turns.
+#   - Full audit (force, first sync of a repo, or weekly on the configured
+#     weekday): every managed doc, on the `opus` alias with 150 turns.
+#   Aliases resolve to the latest model the OAuth token can use.
+#
+# Secrets (org level, `secrets: inherit`):
+#   CLAUDE_CODE_OAUTH_TOKEN     required
+#   DOCS_SOURCES_READ_TOKEN     required, read-only on the source repos
+#   GOOGLE_SERVICE_ACCOUNT_KEY  optional, read-only Drive mirror
 
 name: Docs sync (reusable)
 
@@ -18,24 +28,23 @@ on:
   workflow_call:
     inputs:
       config_path:
-        description: Path of the project config inside the docs repo
         type: string
         default: docs-sync.config.yml
       force:
-        description: Run Claude even if no source repo changed since the last sync
+        description: Full audit of every managed doc, even without new commits
         type: boolean
         default: false
       auto_merge:
-        description: Squash-merge the docs PR automatically
         type: boolean
         default: true
       model:
+        description: Override the model for any mode (default sonnet incremental, opus full)
         type: string
-        default: claude-opus-5-5
+        default: ""
       max_turns:
-        description: The first full sync of a project can need well over 80 turns
+        description: Override the turn limit for any mode (0 = 40 incremental, 150 full)
         type: number
-        default: 150
+        default: 0
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -62,144 +71,278 @@ jobs:
         id: cfg
         env:
           CONFIG_PATH: ${{ inputs.config_path }}
+          FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           yq -o=json '.' "$CONFIG_PATH" > "$RUNNER_TEMP/config.json"
-          TZ_NAME=$(jq -r '.timezone // "America/Bogota"' "$RUNNER_TEMP/config.json")
-          echo "project=$(jq -r '.project' "$RUNNER_TEMP/config.json")" >> "$GITHUB_OUTPUT"
-          echo "display_name=$(jq -r '.display_name // .project' "$RUNNER_TEMP/config.json")" >> "$GITHUB_OUTPUT"
-          echo "org=$(jq -r '.org' "$RUNNER_TEMP/config.json")" >> "$GITHUB_OUTPUT"
-          echo "today=$(TZ="$TZ_NAME" date +%F)" >> "$GITHUB_OUTPUT"
-          echo "managed=$(jq -r '.docs.managed | join(", ")' "$RUNNER_TEMP/config.json")" >> "$GITHUB_OUTPUT"
-          echo "protected=$(jq -r '(.docs.protected // []) | join(", ")' "$RUNNER_TEMP/config.json")" >> "$GITHUB_OUTPUT"
-          echo "drive_folder_id=$(jq -r '.mirror.drive_folder_id // ""' "$RUNNER_TEMP/config.json")" >> "$GITHUB_OUTPUT"
+          c="$RUNNER_TEMP/config.json"
+          TZ_NAME=$(jq -r '.timezone // "America/Bogota"' "$c")
+          weekday=$(jq -r '.full_audit_weekday // 7' "$c")
+          today_wd=$(TZ="$TZ_NAME" date +%u)
+          full=false
+          [ "$FORCE" = "true" ] && full=true
+          [ "$EVENT" = "schedule" ] && [ "$today_wd" = "$weekday" ] && full=true
+          {
+            echo "display_name=$(jq -r '.display_name // .project' "$c")"
+            echo "org=$(jq -r '.org' "$c")"
+            echo "today=$(TZ="$TZ_NAME" date +%F)"
+            echo "protected=$(jq -r '(.docs.protected // []) | join(", ")' "$c")"
+            echo "drive_folder_id=$(jq -r '.mirror.drive_folder_id // ""' "$c")"
+            echo "full=$full"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Clone source repos (read-only)
+      - name: Clone sources and analyze changes
         id: sources
         env:
           TOKEN: ${{ secrets.DOCS_SOURCES_READ_TOKEN }}
           ORG: ${{ steps.cfg.outputs.org }}
+          FULL: ${{ steps.cfg.outputs.full }}
+          MODEL: ${{ inputs.model }}
+          MAX_TURNS: ${{ inputs.max_turns }}
         run: |
           set -euo pipefail
-          SRC="$RUNNER_TEMP/sources"
-          mkdir -p "$SRC"
-          STATE=.docs-sync/state.json
-          [ -f "$STATE" ] || echo '{"sources":{}}' > "$STATE"
-          echo '{}' > "$RUNNER_TEMP/manifest.json"
-          changed=false
+          SRC="$RUNNER_TEMP/sources"; mkdir -p "$SRC" .docs-sync
+          [ -f .docs-sync/state.json ] || echo '{"sources":{}}' > .docs-sync/state.json
           for row in $(jq -c '.sources[]' "$RUNNER_TEMP/config.json"); do
-            repo=$(echo "$row" | jq -r '.repo')
-            branch=$(echo "$row" | jq -r '.branch // "dev"')
+            repo=$(jq -r '.repo' <<<"$row"); branch=$(jq -r '.branch // "dev"' <<<"$row")
             git clone --quiet --branch "$branch" --single-branch \
               "https://x-access-token:${TOKEN}@github.com/${ORG}/${repo}.git" "$SRC/$repo"
-            # Drop the token from the clone: nothing can push back to the source repo.
+            # Drop the token: nothing can push back to a source repo.
             git -C "$SRC/$repo" remote set-url origin "https://github.com/${ORG}/${repo}.git"
-            sha=$(git -C "$SRC/$repo" rev-parse HEAD)
-            prev=$(jq -r --arg r "$repo" '.sources[$r].sha // ""' "$STATE")
-            [ "$sha" != "$prev" ] && changed=true
-            jq --arg r "$repo" --arg b "$branch" --arg s "$sha" --arg p "$prev" \
-              '.[$r] = {branch: $b, sha: $s, previous_sha: $p}' \
-              "$RUNNER_TEMP/manifest.json" > "$RUNNER_TEMP/m.tmp" && mv "$RUNNER_TEMP/m.tmp" "$RUNNER_TEMP/manifest.json"
           done
-          # Source repos are read-only for the rest of the job.
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          T = os.environ["RUNNER_TEMP"]; SRC = f"{T}/sources"
+          cfg = json.load(open(f"{T}/config.json"))
+          state = json.load(open(".docs-sync/state.json")).get("sources", {})
+          full = os.environ["FULL"] == "true"
+          managed = cfg["docs"]["managed"]
+          scripted = {"changelog", "checkpoint"}
+          DEPS_SUBJECT = re.compile(r"^(build|chore|fix)\(deps[^)]*\)|^bump |^chore: bump", re.I)
+          triggers = {
+            "data-model": r"(models\.py$|/models/|/migrations/|schema\.prisma$)",
+            "design": r"(\.css$|tailwind\.config|-spec\.md$|DESIGN\.md$|/styles/|/components/ui/|/tokens)",
+            "context": r"(package\.json$|requirements|pyproject\.toml$|Dockerfile|docker-compose|/settings/|CLAUDE\.md$|AGENTS\.md$|README\.md$|astro\.config|vite\.config|next\.config|\.github/workflows/|netlify\.toml$|\.nvmrc$)",
+            "product": r"(/pages/|/features/|urls\.py$|api_router\.py$|constants\.ts$|/views\.py$|serializers|plan)",
+            "rollback-main": r"(deploy[^/]*\.sh$|\.github/workflows/cd-|docker-compose\.prod|deploy-on-dispatch)",
+            "git-flow": r"(\.github/workflows/|CLAUDE\.md$|commitlint|lefthook|CONTRIBUTING\.md$)",
+            "secrets-organizacion": r"\.github/workflows/",
+            "dev-agent": r"(dev-agent\.yml$|README\.md$)",
+          }
+          triggers.update(cfg["docs"].get("triggers") or {})
+          def git(repo, *a):
+              return subprocess.run(["git", "-C", f"{SRC}/{repo}", *a], capture_output=True, text=True, check=True).stdout
+          manifest, report, meaningful, commits_all, first = {}, [], [], {}, False
+          for s in cfg["sources"]:
+              repo, branch = s["repo"], s.get("branch", "dev")
+              sha = git(repo, "rev-parse", "HEAD").strip()
+              prev = state.get(repo, {}).get("sha", "")
+              manifest[repo] = {"branch": branch, "sha": sha, "previous_sha": prev}
+              if prev == sha:
+                  continue
+              if not prev or subprocess.run(["git", "-C", f"{SRC}/{repo}", "cat-file", "-e", prev]).returncode:
+                  first = True
+                  commits_all[repo] = {"first": True, "sha": sha, "commits": []}
+                  report.append(f"## {repo} (`{branch}`)\n\nPrimer sync o historial reescrito: estado base en `{sha[:7]}`.\n")
+                  continue
+              log = git(repo, "log", "--no-merges", "--name-only", "--format=@@%h|%cs|%an|%s", f"{prev}..{sha}")
+              commits, cur = [], None
+              for line in log.splitlines():
+                  if line.startswith("@@"):
+                      h, d, a, subj = line[2:].split("|", 3)
+                      cur = {"hash": h, "date": d, "author": a, "subject": subj, "files": [],
+                             "deps": a.startswith("dependabot") or bool(DEPS_SUBJECT.search(subj))}
+                      commits.append(cur)
+                  elif line.strip() and cur:
+                      cur["files"].append(line.strip())
+              commits_all[repo] = {"first": False, "sha": sha, "commits": commits}
+              files = sorted({f for c in commits if not c["deps"] for f in c["files"]})
+              meaningful += [(repo, f) for f in files]
+              stat = git(repo, "diff", "--shortstat", prev, sha).strip()
+              lines = [f"## {repo} (`{branch}` {prev[:7]}..{sha[:7]})", "", f"Diff: {stat}", "", "Commits:"]
+              lines += [f"- {c['hash']} {c['date']} {c['subject']}{' [deps]' if c['deps'] else ''}" for c in commits]
+              lines += ["", "Archivos cambiados (sin commits de dependencias):"]
+              lines += [f"- {f}" for f in files[:300]] or ["- (ninguno)"]
+              report.append("\n".join(lines) + "\n")
+          changed = any(m["sha"] != m["previous_sha"] for m in manifest.values())
+          full = full or first
+          candidates = [d for d in managed if d not in scripted]
+          if full:
+              affected = candidates
+          else:
+              affected = []
+              if meaningful:
+                  code_commits = [c for r in commits_all.values() for c in r["commits"] if not c["deps"]]
+                  for d in candidates:
+                      if d == "status":
+                          affected.append(d)
+                      elif d == "roadmap":
+                          if any(re.match(r"^(feat|fix|refactor)", c["subject"]) for c in code_commits):
+                              affected.append(d)
+                      elif triggers.get(d) and any(re.search(triggers[d], f) for _, f in meaningful):
+                          affected.append(d)
+          mode = "full" if full else "incremental"
+          model = os.environ.get("MODEL") or ("opus" if full else "sonnet")
+          turns = int(float(os.environ.get("MAX_TURNS") or 0)) or (150 if full else 40)
+          json.dump(manifest, open(f"{T}/manifest.json", "w"), indent=2)
+          json.dump(commits_all, open(f"{T}/commits.json", "w"), indent=2)
+          with open(f"{SRC}/_changes.md", "w") as fh:
+              fh.write(f"# Cambios desde el último sync (modo {mode})\n\nDocs a actualizar: {', '.join(affected) or 'ninguno'}\n\n")
+              fh.write("\n".join(report) or "Sin commits nuevos.\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"run={'true' if (changed or full) else 'false'}\n")
+              out.write(f"claude={'true' if affected else 'false'}\n")
+              out.write(f"affected={', '.join(affected)}\nmode={mode}\nmodel={model}\nturns={turns}\n")
+          print(f"modo={mode} cambios={changed} docs={affected} modelo={model} turnos={turns}")
+          PY
           chmod -R a-w "$SRC"
-          if [ "$changed" = "true" ] || [ "${{ inputs.force }}" = "true" ]; then
-            cp "$RUNNER_TEMP/manifest.json" .docs-sync/manifest.json
-            run=true
-          else
-            run=false
-            echo "Sin commits nuevos en los repos fuente desde el ultimo sync." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "dir=$SRC" >> "$GITHUB_OUTPUT"
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
-          cat "$RUNNER_TEMP/manifest.json"
+          cp "$RUNNER_TEMP/manifest.json" .docs-sync/manifest.json
 
       - name: Update docs with Claude
-        if: steps.sources.outputs.run == 'true'
+        if: steps.sources.outputs.claude == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           claude_args: |
-            --model ${{ inputs.model }}
-            --max-turns ${{ inputs.max_turns }}
+            --model ${{ steps.sources.outputs.model }}
+            --max-turns ${{ steps.sources.outputs.turns }}
             --add-dir ${{ steps.sources.outputs.dir }}
-            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git -C:*)" "Bash(git mv:*)" "Bash(git rm:*)" "Bash(git status:*)" "Bash(ls:*)" "Bash(date:*)"
+            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git -C:*)" "Bash(git mv:*)" "Bash(git rm:*)" "Bash(git status:*)" "Bash(ls:*)"
           prompt: |
-            Eres el agente de documentación de ${{ steps.cfg.outputs.display_name }} (Lúmina W). Hoy es ${{ steps.cfg.outputs.today }} (America/Bogota).
+            Eres el agente de documentación de ${{ steps.cfg.outputs.display_name }} (Lúmina W). Hoy es ${{ steps.cfg.outputs.today }} (America/Bogota). Modo: ${{ steps.sources.outputs.mode }}.
 
-            ## Entradas
-            - Repos fuente, clonados en `${{ steps.sources.outputs.dir }}/<repo>` en la rama indicada en `.docs-sync/manifest.json` (sha actual y `previous_sha` del último sync). SON DE SOLO LECTURA: nunca escribas, hagas checkout, commit ni push en ellos. Léelos con Read/Grep/Glob y `git -C <ruta> log|show|diff|ls-tree|grep`.
-            - Docs oficiales: archivos `*.md` en la raíz de este repo. Config en `${{ inputs.config_path }}`.
+            ## Alcance
+            - Actualiza SOLO estos docs: ${{ steps.sources.outputs.affected }}. No toques ningún otro.
+            - `changelog` y `checkpoint` los genera el workflow: no los edites.
+            - Punto de partida obligatorio: `${{ steps.sources.outputs.dir }}/_changes.md` (commits, archivos cambiados y diff de cada repo desde el último sync).
+            - Modo incremental: lee solo los archivos cambiados que importen para esos docs y lo mínimo alrededor. No recorras repos completos. Si un cambio no afecta a un doc de la lista, déjalo igual.
+            - Modo full: auditoría completa de los docs de la lista contra los repos.
+            - Repos fuente en `${{ steps.sources.outputs.dir }}/<repo>`, SOLO LECTURA: léelos con Read, Grep, Glob y `git -C <ruta> log|show|diff`.
 
             ## Reglas
-            1. El repo fuente es la verdad. Cada afirmación que escribas debe salir de un archivo o commit que leíste; cita ruta cuando aporte. Si algo no se puede verificar, escribe "No verificado". Nunca adivines ni completes con suposiciones.
-            2. Tipos gestionados: ${{ steps.cfg.outputs.managed }}. Existe exactamente UN archivo por tipo, con nombre `<tipo>-YYYY-MM-DD.md`, donde la fecha es la de su última actualización real de contenido.
-            3. Si el contenido de un doc cambia hoy, renómbralo con `git mv` a `<tipo>-${{ steps.cfg.outputs.today }}.md` y actualiza su línea "Última actualización". Si no cambia, no lo toques ni lo renombres.
-            4. Si falta un tipo gestionado, créalo con fecha de hoy solo con lo que puedas verificar en los repos fuente. Si encuentras más de un archivo del mismo tipo, fusiona en el más reciente y borra los demás con `git rm`. Actualiza referencias cruzadas entre docs a los nombres nuevos.
-            5. Docs protegidos: ${{ steps.cfg.outputs.protected }}. Nunca los edites, renombres ni borres. Si el código contradice lo que dicen, repórtalo en `status` y en el reporte.
-            6. `changelog`: agrega arriba una sección `## ${{ steps.cfg.outputs.today }}` con los commits entre `previous_sha` y `sha` de cada repo (tabla Repo | PR | Cambio, en español, agrupando bumps de Dependabot en una sola línea). Nunca reescribas entradas anteriores.
-            7. `checkpoint`: refleja el `.claude/CHECKPOINT.md` actual de cada repo fuente; si difieren, manda el del repo.
-            8. `status`: conteos, pendientes por repo, ramas y hallazgos abiertos a la fecha; marca como resuelto lo que el código ya resolvió. Nada obsoleto.
-            9. `design`: tokens de color, tipografía y componentes según los archivos de diseño de los repos fuente.
-            10. Formato: español, tablas y listas escaneables, sin emojis, sin guion largo (U+2014). Pie de cada doc tocado: `*Sincronizado: ${{ steps.cfg.outputs.today }} | Commits revisados: <repo> <sha corto>, ...*`.
-            11. No crees archivos fuera de la raíz del repo salvo `.docs-sync/last-report.md`. No edites `.github/`, `${{ inputs.config_path }}` ni `.docs-sync/state.json`.
+            1. El repo fuente es la verdad. Cada afirmación sale de un archivo o commit que leíste. Si no se puede verificar, escribe "No verificado". Nunca adivines.
+            2. Un archivo por tipo: `<tipo>-YYYY-MM-DD.md`, con la fecha de la última actualización real. Si cambias un doc, renómbralo con `git mv` a `<tipo>-${{ steps.cfg.outputs.today }}.md` y actualiza su línea "Última actualización". Si no cambia, no lo renombres. Si falta un tipo de la lista, créalo solo con lo verificable.
+            3. Docs protegidos: ${{ steps.cfg.outputs.protected }}. Nunca los edites; si el código los contradice, repórtalo.
+            4. `status`: conteos, pendientes, ramas y hallazgos abiertos; marca como resuelto lo que el código ya resolvió.
+            5. Formato: español, tablas y listas, sin emojis, sin guion largo (U+2014). Pie: `*Sincronizado: ${{ steps.cfg.outputs.today }} | Commits revisados: <repo> <sha corto>, ...*`.
+            6. Solo archivos `*.md` de la raíz y `.docs-sync/last-report.md`. No edites `.github/`, la config ni `.docs-sync/state.json`.
 
-            ## Salida obligatoria
-            Escribe `.docs-sync/last-report.md` en español con:
-            - Resumen: docs actualizados, renombrados, borrados, sin cambios.
-            - Tabla de desincronizaciones (Doc | Qué decía | Qué dice el repo | Acción).
-            - Inconsistencias encontradas dentro de los repos fuente (solo reportar).
-            - Dudas que requieren a la usuaria.
+            ## Salida
+            Escribe `.docs-sync/last-report.md` en español y breve: docs actualizados o sin cambios, desincronizaciones (Doc | Qué decía | Qué dice el repo | Acción), inconsistencias en los repos (solo reportar) y dudas para la usuaria.
 
       - name: Guardrails
         if: steps.sources.outputs.run == 'true'
         run: |
           set -euo pipefail
-          # Only markdown at the root and the report may change.
-          bad=$(git status --porcelain -uall | awk '{print $NF}' | grep -Ev '^[^/]+\.md$|^\.docs-sync/(last-report|manifest)\.md$|^\.docs-sync/manifest\.json$' || true)
+          st=$(git status --porcelain -uall)
+          bad=$(awk '{print $NF}' <<<"$st" | grep -Ev '^[^/]+\.md$|^\.docs-sync/(last-report\.md|manifest\.json)$' || true)
           if [ -n "$bad" ]; then echo "Cambios fuera de lo permitido:"; echo "$bad"; exit 1; fi
-          # Protected docs must stay untouched.
-          for t in $(jq -r '(.docs.protected // [])[]' "$RUNNER_TEMP/config.json"); do
-            touched=$(git status --porcelain -uall | grep -E " ${t}-[^ ]*\.md" || true)
-            if [ -n "$touched" ]; then echo "Doc protegido modificado: $touched"; exit 1; fi
+          for t in $(jq -r '(.docs.protected // [])[]' "$RUNNER_TEMP/config.json") changelog checkpoint; do
+            touched=$(grep -E " ${t}-[^ ]*\.md" <<<"$st" || true)
+            if [ -n "$touched" ]; then echo "Claude modificó un doc que no le corresponde: $touched"; exit 1; fi
           done
-          # One file per managed type.
+
+      - name: Build changelog and checkpoint
+        if: steps.sources.outputs.run == 'true'
+        env:
+          TODAY: ${{ steps.cfg.outputs.today }}
+          DISPLAY: ${{ steps.cfg.outputs.display_name }}
+          SRC: ${{ steps.sources.outputs.dir }}
+          CLAUDE_RAN: ${{ steps.sources.outputs.claude }}
+          MODE: ${{ steps.sources.outputs.mode }}
+          AFFECTED: ${{ steps.sources.outputs.affected }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, os, re, subprocess
+          T, today, disp, SRC = os.environ["RUNNER_TEMP"], os.environ["TODAY"], os.environ["DISPLAY"], os.environ["SRC"]
+          cfg = json.load(open(f"{T}/config.json")); managed = cfg["docs"]["managed"]
+          commits = json.load(open(f"{T}/commits.json")); manifest = json.load(open(f"{T}/manifest.json"))
+          done = []
+          def current(kind):
+              f = sorted(glob.glob(f"{kind}-*.md")); return f[-1] if f else None
+          def place(kind, text):
+              old, new = current(kind), f"{kind}-{today}.md"
+              if old and old != new:
+                  subprocess.run(["git", "mv", old, new], check=True)
+              open(new, "w").write(text); done.append(new)
+          if "changelog" in managed and commits:
+              rows = []
+              for repo, info in commits.items():
+                  if info["first"]:
+                      rows.append(f"| {repo} | - | Primer sync: estado base en `{info['sha'][:7]}` |"); continue
+                  deps = [c for c in info["commits"] if c["deps"]]
+                  for c in info["commits"]:
+                      if c["deps"]:
+                          continue
+                      m = re.search(r"\(#(\d+)\)\s*$", c["subject"])
+                      subj = re.sub(r"\s*\(#\d+\)\s*$", "", c["subject"]).replace("|", "/")
+                      rows.append(f"| {repo} | {'#' + m.group(1) if m else '-'} | {subj} |")
+                  if deps:
+                      rows.append(f"| {repo} | - | {len(deps)} actualizaciones de dependencias |")
+              if rows:
+                  old = current("changelog")
+                  text = open(old).read() if old else f"# {disp} - Changelog\n\n> Última actualización: {today}\n> Generado por el sync desde `git log` de la rama de cada repo fuente.\n\n"
+                  text = re.sub(r"(?m)^> Última actualización:.*$", f"> Última actualización: {today}", text, count=1)
+                  head = f"## {today}"
+                  hdr = rf"(?m)^{re.escape(head)}\s*\n\n\| Repo \| PR \| Cambio \|\n\|---\|---\|---\|\n"
+                  if re.search(hdr, text):
+                      text = re.sub(hdr, lambda mm: mm.group(0) + "\n".join(rows) + "\n", text, count=1)
+                  else:
+                      block = f"{head}\n\n| Repo | PR | Cambio |\n|---|---|---|\n" + "\n".join(rows) + "\n\n"
+                      m = re.search(r"(?m)^## ", text)
+                      text = text[:m.start()] + block + text[m.start():] if m else text.rstrip() + "\n\n" + block
+                  place("changelog", text)
+          if "checkpoint" in managed:
+              parts = []
+              for s in cfg["sources"]:
+                  repo = s["repo"]; base = f"{SRC}/{repo}"
+                  path = next((p for p in (".claude/CHECKPOINT.md", "CHECKPOINT.md") if os.path.isfile(f"{base}/{p}")), None)
+                  body = open(f"{base}/{path}").read().strip() if path else "Sin checkpoint en el repo."
+                  parts.append(f"## {repo}\n\nFuente: `{path or '-'}` en `{manifest[repo]['branch']}`.\n\n{body}\n")
+              body = "\n".join(parts)
+              old = current("checkpoint")
+              prev_body = ("## " + open(old).read().split("\n## ", 1)[-1]) if old else ""
+              if prev_body.strip() != body.strip():
+                  place("checkpoint", f"# {disp} - Checkpoint\n\n> Última actualización: {today}\n> Copia del checkpoint de cada repo fuente, generada por el sync. Si difiere, manda el del repo.\n\n{body}")
+          rep = ".docs-sync/last-report.md"
+          auto = f"\n## Generado por script\n\n- Modo: {os.environ['MODE']}\n- Docs revisados por Claude: {os.environ['AFFECTED'] or 'ninguno'}\n- Docs generados por script: {', '.join(done) or 'ninguno'}\n"
+          if os.environ["CLAUDE_RAN"] == "true" and os.path.exists(rep):
+              open(rep, "a").write(auto)
+          else:
+              open(rep, "w").write(f"# Sync {today}\n\nSin cambios que requieran a Claude (sin commits relevantes o solo dependencias).\n{auto}")
+          PY
           dups=$(ls *.md 2>/dev/null | grep -E -- '-[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$' | sed -E 's/-[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$//' | sort | uniq -d || true)
           if [ -n "$dups" ]; then echo "Tipos duplicados: $dups"; exit 1; fi
 
       - name: Save sync state
         if: steps.sources.outputs.run == 'true'
         run: |
-          set -euo pipefail
           jq '{sources: (with_entries(.value |= {branch, sha}))}' "$RUNNER_TEMP/manifest.json" > .docs-sync/state.json
 
-      # Publishes through a PR (auditable). If the org or enterprise does not let
-      # GITHUB_TOKEN create PRs, falls back to a direct push to main of the docs
-      # repo (docs repos only; never used for code repos).
+      # PR when allowed; otherwise direct push to main of the docs repo only.
       - name: Publish
         if: steps.sources.outputs.run == 'true'
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
           TODAY: ${{ steps.cfg.outputs.today }}
+          MODE: ${{ steps.sources.outputs.mode }}
           AUTO_MERGE: ${{ inputs.auto_merge }}
         run: |
           set -euo pipefail
-          if [ -z "$(git status --porcelain)" ]; then
-            echo "Sin cambios." >> "$GITHUB_STEP_SUMMARY"; exit 0
-          fi
+          if [ -z "$(git status --porcelain)" ]; then echo "Sin cambios." >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BRANCH="docs/daily-sync-${TODAY}-${GITHUB_RUN_ID}"
-          git switch -c "$BRANCH"
-          git add -A
-          git commit -m "docs(docs): daily sync ${TODAY}"
+          TITLE="docs(docs): ${MODE} sync ${TODAY}"
+          git switch -c "$BRANCH"; git add -A; git commit -qm "$TITLE"
           BODY=.docs-sync/last-report.md
-          [ -f "$BODY" ] || { echo "Sync de estado sin reporte." > "$RUNNER_TEMP/body.md"; BODY="$RUNNER_TEMP/body.md"; }
-          git push -u origin "$BRANCH"
-          if url=$(gh pr create --base main --head "$BRANCH" --title "docs(docs): daily sync ${TODAY}" --body-file "$BODY" 2>"$RUNNER_TEMP/pr.err"); then
+          git push -q -u origin "$BRANCH"
+          if url=$(gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "$BODY" 2>"$RUNNER_TEMP/pr.err"); then
             echo "url=$url" >> "$GITHUB_OUTPUT"
             if [ "$AUTO_MERGE" = "true" ]; then
               gh pr merge "$url" --squash --auto --delete-branch || gh pr merge "$url" --squash --delete-branch
@@ -207,15 +350,16 @@ jobs:
             { echo "PR: $url"; echo; cat "$BODY"; } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No se pudo crear el PR ($(cat "$RUNNER_TEMP/pr.err")). Publicando directo en main."
-            git push origin "HEAD:main"
-            git push origin --delete "$BRANCH" || true
+            git push -q origin "HEAD:main"
+            git push -q origin --delete "$BRANCH" || true
             echo "pushed=true" >> "$GITHUB_OUTPUT"
-            { echo "Publicado directo en main (sin permiso para crear PRs)."; echo; cat "$BODY"; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "Publicado directo en main."; echo; cat "$BODY"; } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Read-only copy of the official docs in Google Drive. Runs only after the
-      # docs PR is merged, so Drive never shows unmerged content.
+      # Read-only copy in Google Drive. A failure here only warns: the docs are
+      # already published.
       - name: Mirror to Google Drive
+        continue-on-error: true
         if: (steps.pr.outputs.url != '' || steps.pr.outputs.pushed == 'true') && steps.cfg.outputs.drive_folder_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -257,7 +401,6 @@ jobs:
                   drive.files().update(fileId=existing[name]["id"], media_body=media, body={"description": note}).execute()
               else:
                   drive.files().create(body={"name": name, "parents": [folder], "description": note}, media_body=media, fields="id").execute()
-          # Remove only copies this mirror created that are no longer official.
           for name, f in existing.items():
               if name not in local and any(o.get("me") for o in f.get("owners", [])):
                   drive.files().delete(fileId=f["id"]).execute()
