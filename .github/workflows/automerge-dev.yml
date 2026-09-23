@@ -1,0 +1,40 @@
+# Reusable workflow: arm squash auto-merge on every non-draft PR into dev.
+# Origin: terracore-back/terracore-front automerge-dev.yml (#162, #164, #119, #122).
+#
+# Only arms auto-merge: branch protection still holds the merge until the
+# required checks pass, so the repo MUST protect `dev` with required checks.
+# Excluded on purpose: fork PRs and Dependabot PRs (author dependabot[bot]),
+# which wait for a person. Uses PROMOTE_TOKEN (PAT or App token), not the
+# workflow token, so the resulting push to dev triggers the repo's workflows.
+
+name: Auto-merge into dev (reusable)
+
+on:
+  workflow_call:
+    secrets:
+      PROMOTE_TOKEN:
+        required: true
+
+permissions: {}
+
+jobs:
+  enable:
+    if: >-
+      github.event.pull_request.base.ref == 'dev' &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Enable auto-merge
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::PROMOTE_TOKEN is not set, auto-merge cannot be armed"
+            exit 1
+          fi
+          gh pr merge "$PR_NUMBER" --auto --squash

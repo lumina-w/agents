@@ -1,0 +1,68 @@
+# Reusable workflow: delete remote branches whose PR was merged into dev.
+# Origin: terracore-back/terracore-front delete-merged-branches.yml (#156, #121).
+# "Automatically delete head branches" is not reliable with auto-merge, so this
+# sweep is the cleanup to count on. Callers schedule it (every 12 h).
+
+name: Delete merged branches (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
+      base_branch:
+        type: string
+        default: dev
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+    steps:
+      - name: Delete branches of PRs merged into dev
+        run: |
+          # Deletes remote branches whose PR was merged into $BASE_BRANCH, but only when the
+          # branch tip is still the PR head (a reused branch name with new commits is kept).
+          set -euo pipefail
+          BASE_BRANCH="${BASE_BRANCH:-dev}"
+          DRY_RUN="${DRY_RUN:-false}"
+
+          default_branch=$(gh api "repos/$GH_REPO" --jq .default_branch)
+          declare -A tips
+          while IFS=$'\t' read -r name sha protected; do
+            tips[$name]="$sha:$protected"
+          done < <(gh api --paginate "repos/$GH_REPO/branches?per_page=100" --jq '.[] | [.name, .commit.sha, .protected] | @tsv')
+
+          open_heads=$(gh pr list --state open --limit 500 --json headRefName --jq '.[].headRefName')
+          declare -A done_heads
+          deleted=0
+
+          while IFS=$'\t' read -r head oid; do
+            entry="${tips[$head]:-}"
+            [ -n "$entry" ] || continue
+            [ -z "${done_heads[$head]:-}" ] || continue
+            [ "${entry##*:}" = "false" ] || continue
+            case "$head" in dev | stg | main | "$default_branch") continue ;; esac
+            if grep -qxF "$head" <<<"$open_heads"; then continue; fi
+            [ "${entry%%:*}" = "$oid" ] || continue
+            done_heads[$head]=1
+            deleted=$((deleted + 1))
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "would delete: $head"
+            else
+              gh api --method DELETE "repos/$GH_REPO/git/refs/heads/$head" >/dev/null
+              echo "deleted: $head"
+            fi
+          done < <(gh pr list --state merged --base "$BASE_BRANCH" --limit 500 --json headRefName,headRefOid,isCrossRepository --jq '.[] | select(.isCrossRepository | not) | [.headRefName, .headRefOid] | @tsv')
+
+          echo "Merged branches matched (dry_run=$DRY_RUN): $deleted" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "total: $deleted"
