@@ -52,7 +52,8 @@ Reglas del disparo:
 | 5 | Comandos | Solo puede correr los comandos de "tarea terminada" del `CLAUDE.md` del repo más unos pocos extra (formatear, un test puntual). Primero el más acotado; la lista completa una vez antes de cada push |
 | 6 | Bloqueos | Deniega merge, force push, push a `dev`/`stg`/`main`, `reset --hard` y lectura de `.env` |
 | 7 | Retroalimentación | Espera los checks del PR; si el CI falla después, el modo fix lo retoma |
-| 8 | Checkpoint | Actualiza `.claude/CHECKPOINT.md` en el mismo PR. Si el repo aún lo tiene en la raíz, lo mueve a `.claude/` con `git mv`. Es el mismo archivo que leen el hook `SessionStart`, el comando `/checkpoint` y el sync de docs |
+| 8 | Checkpoint | El agente escribe el checkpoint completo en un archivo temporal y el workflow lo commitea como `.claude/CHECKPOINT.md` en la rama del PR (`docs(docs): update checkpoint after #<n>`, push con `PROMOTE_TOKEN` para que los checks vuelvan a correr). Claude no puede escribir en `.claude/`: es ruta protegida para sus herramientas. Si el repo aún lo tiene en la raíz, lo mueve con `git mv`. Es el mismo archivo que leen el hook `SessionStart`, el comando `/checkpoint` y el sync de docs |
+| 9 | Texto del PR y ready | Reemplaza los guiones largos del título y el cuerpo del PR por ", ". El agente abre el PR como draft y el workflow lo marca listo al final (`gh pr ready` con `PROMOTE_TOKEN`), después del checkpoint: `automerge-dev` ignora los drafts y arma el auto-merge con el evento `ready_for_review`, así que no puede mergear antes de que llegue el checkpoint. Si el agente falla, el PR queda en draft |
 
 La protección de ramas de GitHub sigue siendo la barrera real contra pushes a ramas protegidas; los bloqueos del agente son una segunda capa.
 
@@ -120,7 +121,7 @@ jobs:
 |---|---|---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | sí | Todos los repos de código | Autenticación de Claude |
 | `DOCS_SOURCES_READ_TOKEN` | no | Repos de código y repos `*-docs` | Token de solo lectura de la organización (fine-grained PAT, Contents: Read-only) sobre los repos de código, `agents` y los 3 `*-docs`. El sync lo usa para leer el código; el agente, para leer `<proyecto>-docs`. Sin él, el agente trabaja sin contexto de producto |
-| `PROMOTE_TOKEN` | para auto-merge | Repos con `automerge-dev` | Arma el auto-merge; el push a `dev` resultante dispara los workflows del repo |
+| `PROMOTE_TOKEN` | para auto-merge | Repos con `automerge-dev` | Arma el auto-merge; el push a `dev` resultante dispara los workflows del repo. El dev agent lo usa para commitear el checkpoint en la rama del PR; sin él, el checkpoint no se commitea |
 
 ### Repos que lo usan
 

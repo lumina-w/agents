@@ -19,12 +19,17 @@
 #   5. Commands        done-criteria commands of the repo + a few extras; nothing else
 #   6. Guardrails      no merge, no force push, no push to dev/stg/main, no .env reads
 #   7. Feedback        waits for PR checks and fixes; CI failures re-trigger in fix mode
-#   8. Checkpoint      updates the repo's checkpoint file in the same PR
+#   8. Checkpoint      the agent writes it to a temp file; the workflow commits it to
+#                      the PR (.claude/ is a protected path for Claude's own tools)
+#   9. PR text         em dashes in the PR title and body are replaced with ", "; then the
+#                      draft PR is marked ready, which arms auto-merge (after the checkpoint)
 #
 # Secrets (org level, `secrets: inherit`):
 #   CLAUDE_CODE_OAUTH_TOKEN   required
 #   DOCS_SOURCES_READ_TOKEN   optional, read-only token of the org (also used by docs-sync);
 #                             must include lumina-w/<project>-docs
+#   PROMOTE_TOKEN             optional, pushes the checkpoint commit and marks the PR ready so the
+#                             PR workflows (checks, auto-merge) run again
 
 name: Dev agent (reusable)
 
@@ -102,6 +107,8 @@ on:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
       DOCS_SOURCES_READ_TOKEN:
+        required: false
+      PROMOTE_TOKEN:
         required: false
 
 jobs:
@@ -255,8 +262,6 @@ jobs:
           clean() { sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true; }
           base='Edit
           Write
-          Edit(.claude/CHECKPOINT.md)
-          Write(.claude/CHECKPOINT.md)
           Bash(git fetch:*)
           Bash(git checkout -b:*)
           Bash(git switch -c:*)
@@ -286,7 +291,8 @@ jobs:
           echo "allowed=$(cat "$RUNNER_TEMP/allowed")" >> "$GITHUB_OUTPUT"
           if [ "$SIZE" = "small" ]; then m="$SMALL_MODEL"; t="$SMALL_MAX_TURNS"; else m="$MODEL"; t="$MAX_TURNS"; fi
           echo "model=$m" >> "$GITHUB_OUTPUT"; echo "turns=$t" >> "$GITHUB_OUTPUT"
-          add_dir=""; [ -n "$DOCS_DIR" ] && add_dir="--add-dir $DOCS_DIR"
+          mkdir -p "$RUNNER_TEMP/agent-out"
+          add_dir="--add-dir $RUNNER_TEMP/agent-out"; [ -n "$DOCS_DIR" ] && add_dir="$add_dir --add-dir $DOCS_DIR"
           echo "add_dir=$add_dir" >> "$GITHUB_OUTPUT"
           {
             echo 'verify<<EOF_VERIFY'
@@ -336,12 +342,84 @@ jobs:
             ## Flow
             1. implement: branch off an up-to-date `${{ inputs.base_branch }}` with the naming convention from CLAUDE.md. iterate/fix: stay on the PR branch, never create another one.
             2. Make the smallest change that solves the task. No unrelated refactors.
-            3. Update `${{ inputs.checkpoint_file }}` in the same change: current state, what this change did, what is pending. If it does not exist but a `CHECKPOINT.md` exists at the repo root, move it there with `git mv` first (the org keeps checkpoints in `.claude/`). If `.claude/commands/checkpoint.md` exists, follow its format. Update other repo docs only when CLAUDE.md requires it for this kind of change.
+            3. Write the full updated checkpoint to `${{ runner.temp }}/agent-out/checkpoint.md`: current state, what this change did, what is pending. Start from the current `${{ inputs.checkpoint_file }}` (or `CHECKPOINT.md` at the repo root) if it exists. If `.claude/commands/checkpoint.md` exists, follow its format. Do not edit `${{ inputs.checkpoint_file }}` yourself: the workflow commits it to your PR branch after you finish. Update other repo docs only when CLAUDE.md requires it for this kind of change.
             4. Commit with the repo's commit convention and push only the working branch.
-            5. implement: open a non-draft PR against `${{ inputs.base_branch }}` with `--label dev-agent`, referencing #${{ steps.mode.outputs.number }}, with the body sections CLAUDE.md requires. Mark as done only what you ran and saw pass; list the rest under "Not verified". iterate/fix: comment on the PR what you changed and why.
+            5. implement: open a draft PR (`--draft`) against `${{ inputs.base_branch }}` with `--label dev-agent`, referencing #${{ steps.mode.outputs.number }}, with the body sections CLAUDE.md requires. Mark as done only what you ran and saw pass; list the rest under "Not verified". iterate/fix: comment on the PR what you changed and why. The workflow marks the PR ready for review after you finish; do not do it yourself.
             6. Your job ends at the PR. Merging into `${{ inputs.base_branch }}`, branch deletion and promotions are handled by the repo's workflows and people. Never merge, never push to `dev`, `stg` or `main`, never force push, never read `.env` files.
             7. If you cannot finish (missing access, unclear task, failing check outside your change), stop and explain it in a comment instead of guessing.
             8. Never use em dashes or emojis in commits, PR titles or bodies.
+
+      # 8. Checkpoint and PR text, outside Claude
+      - name: Resolve PR
+        id: pr
+        if: steps.mode.outputs.mode != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.mode.outputs.head_ref }}
+          BASE: ${{ inputs.base_branch }}
+        run: |
+          set -euo pipefail
+          branch="${HEAD_REF:-$(git branch --show-current)}"
+          if [ -z "$branch" ] || [ "$branch" = "$BASE" ]; then echo "Sin rama de PR."; exit 0; fi
+          number=$(gh pr list --head "$branch" --state open --json number -q '.[0].number // empty')
+          [ -n "$number" ] || { echo "Sin PR abierto para $branch."; exit 0; }
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Commit checkpoint
+        if: steps.pr.outputs.number != ''
+        env:
+          TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          NUMBER: ${{ steps.mode.outputs.number }}
+          TARGET: ${{ inputs.checkpoint_file }}
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/agent-out/checkpoint.md"
+          [ -s "$src" ] || { echo "El agente no escribió checkpoint."; exit 0; }
+          [ -n "$TOKEN" ] || { echo "::warning::Sin PROMOTE_TOKEN: el checkpoint no se commitea."; exit 0; }
+          git fetch --quiet origin "$BRANCH"
+          git checkout --quiet --force -B "$BRANCH" "origin/$BRANCH"
+          mkdir -p "$(dirname "$TARGET")"
+          if [ ! -f "$TARGET" ] && [ -f CHECKPOINT.md ] && [ "$TARGET" != CHECKPOINT.md ]; then git mv CHECKPOINT.md "$TARGET"; fi
+          cp "$src" "$TARGET"
+          git add "$TARGET"
+          if git diff --cached --quiet; then echo "Checkpoint sin cambios."; exit 0; fi
+          git -c user.name="$(git log -1 --format=%an)" -c user.email="$(git log -1 --format=%ae)" \
+            commit --quiet -m "docs(docs): update checkpoint after #$NUMBER"
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          # The empty value drops the checkout's own header so the push runs as PROMOTE_TOKEN
+          # and triggers the PR workflows again.
+          git -c http.https://github.com/.extraheader= \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --quiet origin "HEAD:refs/heads/$BRANCH"
+
+      - name: Strip em dashes from the PR
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          title=$(gh pr view "$PR" --json title -q .title)
+          body=$(gh pr view "$PR" --json body -q .body)
+          dash=$(printf '\342\200\224')
+          new_title=$(printf '%s' "$title" | sed "s/ *$dash */, /g")
+          new_body=$(printf '%s\n' "$body" | sed "s/ *$dash */, /g")
+          if [ "$new_title" = "$title" ] && [ "$new_body" = "$body" ]; then echo "Sin guiones largos."; exit 0; fi
+          gh pr edit "$PR" --title "$new_title" --body "$new_body"
+
+      # Last: auto-merge is only armed once the PR leaves draft, so the checkpoint lands first.
+      - name: Mark ready
+        if: always() && steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::warning::Sin PROMOTE_TOKEN: el PR #$PR queda en draft."; exit 0; }
+          if [ "$(gh pr view "$PR" --json isDraft -q .isDraft)" = "true" ]; then gh pr ready "$PR"; else echo "El PR #$PR ya estaba listo."; fi
 
       - name: Summary
         if: always()
