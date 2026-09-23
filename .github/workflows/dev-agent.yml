@@ -255,6 +255,8 @@ jobs:
           clean() { sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true; }
           base='Edit
           Write
+          Edit(.claude/CHECKPOINT.md)
+          Write(.claude/CHECKPOINT.md)
           Bash(git fetch:*)
           Bash(git checkout -b:*)
           Bash(git switch -c:*)
@@ -339,6 +341,7 @@ jobs:
             5. implement: open a non-draft PR against `${{ inputs.base_branch }}` with `--label dev-agent`, referencing #${{ steps.mode.outputs.number }}, with the body sections CLAUDE.md requires. Mark as done only what you ran and saw pass; list the rest under "Not verified". iterate/fix: comment on the PR what you changed and why.
             6. Your job ends at the PR. Merging into `${{ inputs.base_branch }}`, branch deletion and promotions are handled by the repo's workflows and people. Never merge, never push to `dev`, `stg` or `main`, never force push, never read `.env` files.
             7. If you cannot finish (missing access, unclear task, failing check outside your change), stop and explain it in a comment instead of guessing.
+            8. Never use em dashes or emojis in commits, PR titles or bodies.
 
       - name: Summary
         if: always()
