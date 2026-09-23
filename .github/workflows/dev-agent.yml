@@ -91,7 +91,7 @@ on:
         default: 40
       small_max_turns:
         type: number
-        default: 20
+        default: 40
       max_fix_rounds:
         type: number
         default: 2
@@ -346,4 +346,5 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
           NUMBER: ${{ steps.mode.outputs.number }}
           STATUS: ${{ job.status }}
-        run: echo "Dev agent $MODE sobre #$NUMBER terminó con estado $STATUS." >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "Dev agent $MODE sobre #$NUMBER terminó con estado $STATUS." >> "$GITHUB_STEP_SUMMARY"
