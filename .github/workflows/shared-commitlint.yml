@@ -1,0 +1,37 @@
+# Reusable workflow: lint the commits a push introduces against Conventional Commits.
+# Origin: commit-lint.yml, identical in every product repo.
+#
+# The action compares the push event's `before` and `after` SHAs through the
+# GitHub API, so older history is never re-checked. A brand-new branch has no
+# `before`, and then only the commits listed in the push payload are linted.
+# Rules live in the caller repo's .commitlintrc.json, the same file
+# shared-pr-title.yml checks the PR title against. Callers trigger it on
+# `push: branches: ['**']`.
+
+name: Commit lint (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      config-file:
+        type: string
+        default: .commitlintrc.json
+
+permissions: {}
+
+jobs:
+  commitlint:
+    name: Conventional Commits
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: wagoid/commitlint-github-action@v6
+        with:
+          # The action falls back to config-conventional silently when this
+          # file is missing, so a wrong path would not fail the job.
+          configFile: ${{ inputs.config-file }}

@@ -1,0 +1,66 @@
+# Reusable workflow: CodeQL analysis (GitHub-native SAST) for one language.
+# Origin: codeql.yml (terracore-back, terracore-front, terracore-page).
+#
+# Informational by default, like terracore-back and terracore-front: findings
+# show up under Security -> Code scanning and never block a PR. While Code
+# Security is disabled on a private repo the SARIF upload fails with "Code
+# Security must be enabled", so the analyze step is also non-blocking unless
+# `blocking` is true. Callers pick the triggers (push, pull_request, schedule
+# or only workflow_dispatch, as terracore-page does without GHAS).
+
+name: CodeQL (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      language:
+        description: CodeQL language (python, javascript-typescript, ...)
+        type: string
+        required: true
+      queries:
+        description: Extra query suite (security-and-quality, ...). Empty uses the default suite
+        type: string
+        default: ''
+      blocking:
+        description: true fails the check when the analysis or the upload fails
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 30
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: analyze
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Not blocking at workflow-run level unless asked: a failing job does not
+    # turn the run red.
+    continue-on-error: ${{ !inputs.blocking }}
+    permissions:
+      # security-events: write is the only one needed to publish results to
+      # Code scanning; the other two are requested by the action itself.
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ inputs.language }}
+          queries: ${{ inputs.queries }}
+
+      # Step-level continue-on-error is what keeps the CHECK RUN green, not
+      # just the workflow run.
+      - name: Perform CodeQL Analysis
+        continue-on-error: ${{ !inputs.blocking }}
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ inputs.language }}"

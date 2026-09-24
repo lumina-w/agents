@@ -1,0 +1,58 @@
+# Reusable workflow: lint the PR title against Conventional Commits.
+# Origin: pr-title.yml, identical in every product repo.
+#
+# PRs are squash-merged, so the PR title becomes the commit that lands on the
+# base branch. It is checked with the same .commitlintrc.json as every pushed
+# commit (shared-commitlint.yml), so the rules live in one place. Callers
+# trigger it on `pull_request: types: [opened, edited, synchronize, reopened]`.
+
+name: PR title (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      config-file:
+        type: string
+        default: .commitlintrc.json
+      node-version:
+        type: string
+        default: '22'
+      commitlint-version:
+        type: string
+        default: '21'
+
+permissions: {}
+
+jobs:
+  pr-title:
+    name: PR title (Conventional Commits)
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      # Passed through the environment, never interpolated into the script,
+      # so a crafted title cannot inject shell.
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      CONFIG_FILE: ${{ inputs.config-file }}
+      COMMITLINT_VERSION: ${{ inputs.commitlint-version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Lint the PR title
+        run: |
+          # commitlint resolves `extends` from the config file's own directory,
+          # so the config is linted from a scratch dir holding the packages.
+          dir="$RUNNER_TEMP/commitlint"
+          mkdir -p "$dir"
+          cp "$CONFIG_FILE" "$dir/"
+          cd "$dir"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --silent \
+            "@commitlint/cli@$COMMITLINT_VERSION" "@commitlint/config-conventional@$COMMITLINT_VERSION"
+          printf '%s' "$PR_TITLE" | npx --no-install commitlint --config "$(basename "$CONFIG_FILE")"

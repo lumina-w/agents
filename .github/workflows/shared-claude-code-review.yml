@@ -1,0 +1,57 @@
+# Reusable workflow: Claude code review with inline comments on the PR.
+# Origin: claude-code-review.yml (okroot-*, blog-w, luminaw-page). The variants
+# differed only in the --model flag, now the optional `model` input: empty
+# leaves the action's default model.
+#
+# Callers trigger it on
+# `pull_request: types: [opened, synchronize, ready_for_review, reopened]`
+# and pass CLAUDE_CODE_OAUTH_TOKEN. A newer push to the same ref cancels the
+# review in progress.
+
+name: Claude Code Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      model:
+        description: Model passed as --model (claude-sonnet-5, sonnet, ...). Empty uses the action default
+        type: string
+        default: ''
+      timeout-minutes:
+        type: number
+        default: 15
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+permissions: {}
+
+jobs:
+  review:
+    name: Claude Code Review
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: claude-code-review-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          claude_args: >-
+            ${{ inputs.model && format('--model {0} ', inputs.model) || '' }}--allowedTools "mcp__github_inline_comment__create_inline_comment"

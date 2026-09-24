@@ -1,0 +1,187 @@
+# Reusable workflow: build a Docker image, optionally scan it with Trivy, push
+# it to GHCR and optionally notify a repo with repository_dispatch.
+# Origin: the docker-publish job of cd-staging.yml / cd-production.yml
+# (terracore-front, okroot-back) and docker-build-push.yml (okroot-front).
+#
+# The image gets a single tag, <tag-prefix>-<full commit sha>. With trivy-scan
+# the image is built into the local daemon first, scanned (fails on any fixable
+# CRITICAL) and only then pushed, reusing the same layers, so the pushed image
+# is the one that was scanned. The dispatch only fires on a real push: a manual
+# workflow_dispatch run has no guaranteed target branch.
+#
+# Permissions come from the caller job: contents: read and packages: write,
+# plus contents: write when dispatching to the same repo with the workflow
+# token (no DISPATCH_TOKEN).
+
+name: CD Docker publish (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      dockerfile:
+        description: Dockerfile path from the repo root. Empty uses <context>/Dockerfile
+        type: string
+        default: ''
+      context:
+        type: string
+        default: '.'
+      image-name:
+        description: Full GHCR image name. Empty uses ghcr.io/<owner>/<repo>
+        type: string
+        default: ''
+      tag-prefix:
+        description: Tag prefix (stg, main, prod). Also sent as the dispatch payload environment
+        type: string
+        required: true
+      build-args:
+        description: Non-secret build args, KEY=value per line. Secret ones go in the BUILD_ARGS secret
+        type: string
+        default: ''
+      environment:
+        description: GitHub Environment bound to the job. Empty binds none
+        type: string
+        default: ''
+      trivy-scan:
+        type: boolean
+        default: true
+      dispatch-event:
+        description: repository_dispatch event type. Empty skips the dispatch
+        type: string
+        default: ''
+      dispatch-target-repo:
+        description: owner/repo that receives the dispatch. Empty uses the current repo
+        type: string
+        default: ''
+      timeout-minutes:
+        type: number
+        default: 15
+    secrets:
+      BUILD_ARGS:
+        description: Secret build args, KEY=value per line
+        required: false
+      DISPATCH_TOKEN:
+        description: Token for the dispatch. Required when dispatch-target-repo is another repo
+        required: false
+    outputs:
+      image:
+        description: Pushed image reference (name:tag)
+        value: ${{ jobs.publish.outputs.image }}
+      digest:
+        description: Pushed image digest
+        value: ${{ jobs.publish.outputs.digest }}
+
+jobs:
+  publish:
+    name: Build, scan and push image to GHCR
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    environment: ${{ inputs.environment }}
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Resolve image name
+        id: image
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+        run: |
+          if ! [[ "$TAG_PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+            echo "::error::tag-prefix '$TAG_PREFIX' is not a valid Docker tag prefix"
+            exit 1
+          fi
+          name="${IMAGE_NAME:-ghcr.io/$GITHUB_REPOSITORY}"
+          # GHCR rejects uppercase repository names.
+          name="${name,,}"
+          if [[ "$name" != ghcr.io/* ]]; then
+            echo "::error::image-name must be a ghcr.io image (got '$name')"
+            exit 1
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=${{ inputs.tag-prefix }}-${{ github.sha }}
+
+      # Build into the local daemon first so Trivy scans the image before
+      # anything reaches GHCR.
+      - name: Build image
+        if: inputs.trivy-scan
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ${{ inputs.build-args }}
+            ${{ secrets.BUILD_ARGS }}
+
+      # Unfixed findings are ignored: a CRITICAL with no patched package would
+      # block every deploy with nothing to upgrade to.
+      - name: Scan image with Trivy
+        if: inputs.trivy-scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      # Same inputs as "Build image", so with trivy-scan every layer comes from
+      # the local cache and the pushed image is the one that was scanned.
+      - name: Push image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ${{ inputs.build-args }}
+            ${{ secrets.BUILD_ARGS }}
+
+      # Superset of the payloads the receivers read today: environment and
+      # image_digest (terracore-back, okroot-back), image and sha (okroot-front).
+      - name: Build dispatch payload
+        id: payload
+        if: inputs.dispatch-event != '' && github.event_name == 'push'
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        run: |
+          json=$(jq -cn --arg env "$TAG_PREFIX" --arg digest "$DIGEST" --arg image "$IMAGE" --arg sha "$GITHUB_SHA" \
+            '{environment: $env, image_digest: $digest, image: $image, sha: $sha}')
+          echo "json=$json" >> "$GITHUB_OUTPUT"
+
+      - name: Notify ${{ inputs.dispatch-target-repo || github.repository }}
+        if: inputs.dispatch-event != '' && github.event_name == 'push'
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN || github.token }}
+          repository: ${{ inputs.dispatch-target-repo || github.repository }}
+          event-type: ${{ inputs.dispatch-event }}
+          client-payload: ${{ steps.payload.outputs.json }}

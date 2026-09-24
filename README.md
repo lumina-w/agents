@@ -180,3 +180,220 @@ Mantiene al día los repos `lumina-w/<proyecto>-docs` desde la rama `dev` de los
 - Publicación: PR con auto-merge, o push directo a `main` del repo de docs si la empresa no deja a Actions crear PRs.
 - Sin espejo a Drive (retirado el 2026-09-23): los docs viven solo en GitHub y en local.
 <!-- docs-sync:end -->
+
+<!-- shared-workflows:start -->
+## Workflows compartidos de CI/CD (`shared-*.yml`)
+
+Lógica de CI/CD que hoy está copiada en cada repo de producto. Cada repo la llama con un caller corto y el tag mayor (`@v4`), igual que el dev agent. Los repos de producto todavía no los usan: siguen con sus copias.
+
+Reglas comunes:
+
+- Todos aceptan `runner-label`. Vacío corre en `ubuntu-latest`; con valor, en el runner que tenga esa etiqueta (`runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}`).
+- Versiones fijas de acciones: `actions/checkout@v7`, `actions/setup-node@v7`, `actions/setup-python@v7`, `pnpm/action-setup@v6.1.0`, `docker/build-push-action@v7`, `docker/login-action@v4`, `docker/metadata-action@v6`, `github/codeql-action@v4`.
+- Los triggers (`on:`) los pone el caller; el workflow compartido solo declara `workflow_call`.
+- Cada job declara sus permisos mínimos y el job del caller debe conceder al menos esos (un reusable no puede pedir más que su caller). Excepción: `shared-cd-docker-publish.yml` usa los del caller.
+- En GitHub el check queda como `<job del caller> / <nombre del job>`. Al migrar un repo hay que actualizar los checks requeridos de la protección de ramas.
+
+### Caller mínimo
+
+```yaml
+name: Commit lint
+on:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
+jobs:
+  commitlint:
+    uses: lumina-w/agents/.github/workflows/shared-commitlint.yml@v4
+    with:
+      runner-label: ubuntu-latest
+```
+
+### `shared-commitlint.yml`
+
+Origen: `commit-lint.yml`. Lint de Conventional Commits sobre los commits que trae cada push.
+
+- Trigger del caller: `push: branches: ['**']`
+- Permisos: `contents: read`
+- Check: `Conventional Commits`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `config-file` | string | `.commitlintrc.json` | Config de commitlint del repo |
+
+### `shared-pr-title.yml`
+
+Origen: `pr-title.yml`. Valida el título del PR (el commit que queda tras el squash) con el mismo `.commitlintrc.json`.
+
+- Trigger del caller: `pull_request: types: [opened, edited, synchronize, reopened]`
+- Permisos: `contents: read`
+- Check: `PR title (Conventional Commits)`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `config-file` | string | `.commitlintrc.json` | Config de commitlint del repo |
+| `node-version` | string | `'22'` | Node para instalar commitlint |
+| `commitlint-version` | string | `'21'` | Versión mayor de `@commitlint/cli` y `@commitlint/config-conventional` |
+
+### `shared-validate-pr-base.yml`
+
+Origen: `validate-pr-base.yml`. Exige el flujo `dev -> stg -> main` (o una rama de resolución de conflictos con el mismo contenido que la rama esperada).
+
+- Trigger del caller: `pull_request: types: [opened, edited, synchronize, reopened]`
+- Permisos: `contents: read`
+- Check: `PR base must follow dev -> stg -> main`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+
+### `shared-promote-dev-to-stg.yml`
+
+Origen: `promote-dev-to-stg.yml`. Abre o reutiliza el PR de promoción, espera los checks requeridos y lo mergea. Una sola promoción a la vez por par de ramas.
+
+- Trigger del caller: `schedule` (hoy `0 10 * * *`) y `workflow_dispatch`
+- Permisos: `contents: read`, `pull-requests: write`, `checks: read`, `statuses: read`, `actions: read`
+- Secrets: `PROMOTE_TOKEN` (obligatorio). Con `GITHUB_TOKEN` el PR no dispararía los checks
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `source-branch` | string | `dev` | Rama que se promueve |
+| `target-branch` | string | `stg` | Rama destino |
+| `merge-method` | string | `squash` | `squash`, `merge` o `rebase` |
+| `timeout-minutes` | number | `60` | Límite del job |
+
+### `shared-claude-code-review.yml`
+
+Origen: `claude-code-review.yml`. Review de Claude con comentarios inline en el PR. Un push nuevo al mismo ref cancela la review en curso.
+
+- Trigger del caller: `pull_request: types: [opened, synchronize, ready_for_review, reopened]`
+- Permisos: `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write`
+- Secrets: `CLAUDE_CODE_OAUTH_TOKEN` (obligatorio)
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `model` | string | `''` | Se pasa como `--model` (`claude-sonnet-5`, `sonnet`). Vacío usa el modelo por defecto de la action |
+| `timeout-minutes` | number | `15` | Límite del job |
+
+### `shared-codeql.yml`
+
+Origen: `codeql.yml`. Análisis CodeQL de un lenguaje. Por defecto es informativo: si el análisis o la subida del SARIF fallan (por ejemplo, Code Security deshabilitado en un repo privado), el check sigue en verde.
+
+- Trigger del caller: `push`/`pull_request` a `main`, `stg`, `dev` y `schedule` (hoy lunes 06:00 UTC), o solo `workflow_dispatch` en repos sin GHAS
+- Permisos: `security-events: write`, `actions: read`, `contents: read`
+- Check: `analyze`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `language` | string | obligatorio | `python`, `javascript-typescript`, ... |
+| `queries` | string | `''` | Suite extra (`security-and-quality`). Vacío usa la suite por defecto |
+| `blocking` | boolean | `false` | `true` hace fallar el check si falla el análisis o la subida |
+| `timeout-minutes` | number | `30` | Límite del job |
+
+### `shared-security-audit-node.yml`
+
+Origen: `security.yml` de terracore-front (npm) y el job de auditoría del `ci.yml` de okroot-page (npm) y terracore-page (pnpm). Instala dependencias y corre `npm audit` o `pnpm audit`.
+
+- Trigger del caller: el que use el repo (`push`/`pull_request`/`schedule`)
+- Permisos: `contents: read`
+- Check: `npm-audit` o `pnpm-audit`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `package-manager` | string | obligatorio | `npm` o `pnpm` |
+| `node-version` | string | `''` | Versión de Node (`20.x`, `22`) |
+| `node-version-file` | string | `''` | Archivo de versión (`.nvmrc`) |
+| `pnpm-version` | string | `''` | Versión de pnpm. Vacío lee `packageManager` de `package.json` |
+| `working-directory` | string | `'.'` | Carpeta con `package.json` y lockfile |
+| `install-command` | string | `''` | Vacío usa `npm ci` o `pnpm install --frozen-lockfile` |
+| `audit-level` | string | `high` | `low`, `moderate`, `high` o `critical` |
+| `blocking` | boolean | `false` | `true` hace fallar el check con hallazgos en o sobre `audit-level` |
+| `timeout-minutes` | number | `15` | Límite del job |
+
+### `shared-security-audit-python.yml`
+
+Origen: `security.yml` de terracore-back. Dos jobs: `pip-audit` (dependencias, bloqueante por defecto) y `bandit` (SAST, informativo por defecto).
+
+- Trigger del caller: el que use el repo (`push`/`pull_request`/`schedule`)
+- Permisos: `contents: read`
+- Checks: `pip-audit` y `bandit`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `python-version` | string | `''` | Versión de Python (`3.14`, `3.12`) |
+| `python-version-file` | string | `''` | Archivo de versión (`.python-version`) |
+| `working-directory` | string | `'.'` | Carpeta donde corre pip-audit |
+| `requirements-file` | string | `requirements.txt` | Requirements que audita pip-audit, relativo a `working-directory` |
+| `pip-audit-version` | string | `2.9.0` | Versión de pip-audit |
+| `pip-audit-blocking` | boolean | `true` | `false` deja pip-audit solo informativo |
+| `bandit-version` | string | `1.9.4` | Versión de bandit |
+| `bandit-path` | string | `'.'` | Ruta que escanea bandit, relativa a la raíz del repo |
+| `bandit-exclude` | string | `*/tests/*,*/migrations/*,*/.venv/*,*/venv/*` | Rutas excluidas de bandit |
+| `bandit-blocking` | boolean | `false` | `true` hace fallar el check con hallazgos de bandit |
+| `timeout-minutes` | number | `15` | Límite de cada job |
+
+### `shared-gitleaks.yml`
+
+Origen: job `gitleaks` del `ci.yml` de terracore-back y terracore-front. Escaneo de secretos del diff del PR o de los commits del push.
+
+- Trigger del caller: el del CI del repo (`pull_request`)
+- Permisos: `contents: read`, `pull-requests: read`
+- Secrets: `GITLEAKS_LICENSE`. La action la exige en repos de organización; tiene que existir también en el store de secrets de Dependabot
+- Check: `Secret scan (gitleaks)`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `timeout-minutes` | number | `10` | Límite del job |
+
+### `shared-cd-docker-publish.yml`
+
+Origen: job `docker-publish` de `cd-staging.yml`/`cd-production.yml` (terracore-front, okroot-back) y `docker-build-push.yml` (okroot-front). Construye la imagen, la escanea con Trivy (opcional, falla con cualquier CRITICAL que tenga arreglo), la sube a GHCR con el tag `<tag-prefix>-<sha completo>` y, si se pide, envía un `repository_dispatch`. El dispatch solo sale en un `push` real, nunca en `workflow_dispatch`.
+
+- Trigger del caller: `push` a `stg` o `main` (y `workflow_dispatch` si se quiere republicar sin notificar)
+- Permisos (los concede el caller): `contents: read` y `packages: write`; `contents: write` si hace dispatch al mismo repo sin `DISPATCH_TOKEN`
+- Secrets: `BUILD_ARGS` (opcional, `CLAVE=valor` por línea) y `DISPATCH_TOKEN` (opcional; obligatorio si `dispatch-target-repo` es otro repo). Sin `DISPATCH_TOKEN` usa el token del workflow
+- Payload del dispatch: `{"environment": <tag-prefix>, "image_digest": ..., "image": ..., "sha": ...}`, que cubre los campos que leen hoy terracore-back, okroot-back y okroot-front
+- Outputs: `image` (nombre:tag) y `digest`
+
+| Input | Tipo | Default | Uso |
+|---|---|---|---|
+| `runner-label` | string | `''` | Etiqueta del runner |
+| `dockerfile` | string | `''` | Ruta del Dockerfile desde la raíz. Vacío usa `<context>/Dockerfile` |
+| `context` | string | `'.'` | Contexto del build |
+| `image-name` | string | `''` | Imagen completa en GHCR. Vacío usa `ghcr.io/<owner>/<repo>` |
+| `tag-prefix` | string | obligatorio | Prefijo del tag (`stg`, `main`, `prod`); también va como `environment` en el payload |
+| `build-args` | string | `''` | Build args no secretos, `CLAVE=valor` por línea |
+| `environment` | string | `''` | GitHub Environment del job. Vacío no asocia ninguno |
+| `trivy-scan` | boolean | `true` | Escanea la imagen antes de subirla |
+| `dispatch-event` | string | `''` | Tipo de evento del `repository_dispatch`. Vacío no envía nada |
+| `dispatch-target-repo` | string | `''` | `owner/repo` que recibe el dispatch. Vacío usa el repo actual |
+| `timeout-minutes` | number | `15` | Límite del job |
+
+Secrets de un GitHub Environment: el job del caller no puede tener `environment`, así que no puede pasarlos. Si se usa el input `environment` y ese Environment tiene secrets llamados `BUILD_ARGS` o `DISPATCH_TOKEN`, esos reemplazan a los que pase el caller.
+
+```yaml
+jobs:
+  publish:
+    uses: lumina-w/agents/.github/workflows/shared-cd-docker-publish.yml@v4
+    permissions:
+      # write: dispatch al mismo repo con el token del workflow
+      contents: write
+      packages: write
+    with:
+      tag-prefix: stg
+      dockerfile: Dockerfile.prod
+      dispatch-event: backend-image-updated
+    secrets:
+      BUILD_ARGS: |
+        API_URL=${{ secrets.API_URL }}
+```
+<!-- shared-workflows:end -->

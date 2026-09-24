@@ -1,0 +1,107 @@
+# Reusable workflow: dependency audit for Node repos (npm audit or pnpm audit).
+# Origin: npm-audit in terracore-front security.yml, the security job of
+# okroot-page ci.yml (npm) and of terracore-page ci.yml (pnpm).
+#
+# Informational by default (terracore-front, okroot-page): the report stays in
+# the logs and the check stays green. `blocking: true` makes findings at or
+# above `audit-level` fail the check (terracore-page).
+
+name: Security audit Node (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      package-manager:
+        description: npm or pnpm
+        type: string
+        required: true
+      node-version:
+        description: Node version (20.x, 22, ...). Leave empty to use node-version-file
+        type: string
+        default: ''
+      node-version-file:
+        description: File with the Node version (.nvmrc, ...)
+        type: string
+        default: ''
+      pnpm-version:
+        description: pnpm version. Empty reads packageManager from package.json
+        type: string
+        default: ''
+      working-directory:
+        type: string
+        default: '.'
+      install-command:
+        description: Empty uses npm ci or pnpm install --frozen-lockfile
+        type: string
+        default: ''
+      audit-level:
+        description: low, moderate, high or critical
+        type: string
+        default: high
+      blocking:
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  audit:
+    name: ${{ inputs.package-manager }}-audit
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      PACKAGE_MANAGER: ${{ inputs.package-manager }}
+      INSTALL_COMMAND: ${{ inputs.install-command }}
+      AUDIT_LEVEL: ${{ inputs.audit-level }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate inputs
+        run: |
+          case "$PACKAGE_MANAGER" in
+            npm | pnpm) ;;
+            *) echo "::error::package-manager must be npm or pnpm (got '$PACKAGE_MANAGER')"; exit 1 ;;
+          esac
+          case "$AUDIT_LEVEL" in
+            low | moderate | high | critical) ;;
+            *) echo "::error::audit-level must be low, moderate, high or critical (got '$AUDIT_LEVEL')"; exit 1 ;;
+          esac
+
+      - if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.1.0
+        with:
+          version: ${{ inputs.pnpm-version }}
+          package_json_file: ${{ inputs.working-directory }}/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.working-directory }}/${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+
+      - name: Install dependencies
+        run: |
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          elif [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Audit dependencies
+        continue-on-error: ${{ !inputs.blocking }}
+        run: |
+          "$PACKAGE_MANAGER" audit --audit-level="$AUDIT_LEVEL"

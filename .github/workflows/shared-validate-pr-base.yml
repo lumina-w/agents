@@ -1,0 +1,60 @@
+# Reusable workflow: enforce the dev -> stg -> main PR direction.
+# Origin: validate-pr-base.yml, identical in every product repo.
+#
+# A PR into stg must come from dev, a PR into main must come from stg, and no
+# other base is allowed. The one exception is a conflict-resolution branch whose
+# tree matches the expected head exactly. Callers trigger it on
+# `pull_request: types: [opened, edited, synchronize, reopened]`.
+
+name: Validate PR base branch (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  validate-base:
+    name: PR base must follow dev -> stg -> main
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check base/head branch pair
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          # True when HEAD's tree is identical to origin/$1's tree: a
+          # dedicated conflict-resolution branch that carries $1's content
+          # verbatim, just with extra merge-commit parentage so a future
+          # promotion doesn't re-hit the same conflict. Named differently
+          # from 'dev'/'stg' only because a promotion branch can't be pushed
+          # to the protected branch itself to resolve a merge conflict.
+          content_matches() {
+            git fetch origin "$1" --depth=1 -q
+            git diff --quiet "origin/$1" "$HEAD_SHA" --
+          }
+
+          if [[ "$BASE_REF" == "stg" && "$HEAD_REF" != "dev" ]] && ! content_matches dev; then
+            echo "::error::PR targets base 'stg' but head is '$HEAD_REF' (expected 'dev', or a branch whose content matches dev exactly for conflict resolution). This repo's flow is dev -> stg -> main."
+            exit 1
+          fi
+          if [[ "$BASE_REF" == "main" && "$HEAD_REF" != "stg" ]] && ! content_matches stg; then
+            echo "::error::PR targets base 'main' but head is '$HEAD_REF' (expected 'stg', or a branch whose content matches stg exactly for conflict resolution). This repo's flow is dev -> stg -> main."
+            exit 1
+          fi
+          if [[ "$BASE_REF" != "dev" && "$BASE_REF" != "stg" && "$BASE_REF" != "main" ]]; then
+            echo "::error::PR base '$BASE_REF' is not an allowed target (expected one of: dev, stg, main)."
+            exit 1
+          fi
+          echo "OK: head '$HEAD_REF' -> base '$BASE_REF' is a valid PR direction."

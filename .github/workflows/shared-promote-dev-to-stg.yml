@@ -1,0 +1,137 @@
+# Reusable workflow: open (or reuse) the dev -> stg promotion PR, wait for its
+# required checks and merge it.
+# Origin: promote-dev-to-stg.yml (terracore-* and okroot-*/blog-w/luminaw-page
+# variants, which differed only in the actions: read permission kept here).
+#
+# Callers schedule it (daily) and pass PROMOTE_TOKEN: PRs opened with the
+# default GITHUB_TOKEN do not trigger pull_request workflows, so the required
+# checks would never start. Only one promotion runs at a time per repo.
+
+name: Promote dev to stg (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      source-branch:
+        type: string
+        default: dev
+      target-branch:
+        type: string
+        default: stg
+      merge-method:
+        description: squash, merge or rebase
+        type: string
+        default: squash
+      timeout-minutes:
+        type: number
+        default: 60
+    secrets:
+      PROMOTE_TOKEN:
+        required: true
+
+permissions: {}
+
+jobs:
+  promote:
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: promote-${{ inputs.source-branch }}-to-${{ inputs.target-branch }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+      # Read by the check wait below, which uses the workflow token: a
+      # fine-grained PAT cannot be granted access to checks, so PROMOTE_TOKEN
+      # gets "Resource not accessible by personal access token" from
+      # `gh pr checks`.
+      checks: read
+      statuses: read
+      # `gh pr checks` also resolves each check's workflow run, which fails with
+      # "Resource not accessible by integration" without this scope.
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_BRANCH: ${{ inputs.source-branch }}
+      TARGET_BRANCH: ${{ inputs.target-branch }}
+      MERGE_METHOD: ${{ inputs.merge-method }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::PROMOTE_TOKEN is not set, PR checks would never start"
+            exit 1
+          fi
+          case "$MERGE_METHOD" in
+            squash | merge | rebase) ;;
+            *) echo "::error::merge-method must be squash, merge or rebase (got '$MERGE_METHOD')"; exit 1 ;;
+          esac
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes to promote
+        id: diff
+        run: |
+          ahead=$(git rev-list --count "origin/$TARGET_BRANCH..origin/$SOURCE_BRANCH")
+          # Squash merges leave $SOURCE_BRANCH permanently "ahead" by commit
+          # count, so also compare trees to avoid opening empty promotions.
+          if [ "$ahead" -eq 0 ] || git diff --quiet "origin/$TARGET_BRANCH" "origin/$SOURCE_BRANCH"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to promote from $SOURCE_BRANCH to $TARGET_BRANCH" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "$ahead commit(s) to promote from $SOURCE_BRANCH to $TARGET_BRANCH"
+          fi
+
+      - name: Open or reuse the promotion PR
+        id: pr
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          number=$(gh pr list --base "$TARGET_BRANCH" --head "$SOURCE_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            url=$(gh pr create --base "$TARGET_BRANCH" --head "$SOURCE_BRANCH" \
+              --title "chore(deploy): promote $SOURCE_BRANCH to $TARGET_BRANCH" \
+              --body "Automated promotion opened by the scheduled \`promote-dev-to-stg\` workflow.")
+            number=${url##*/}
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "Promotion PR: #$number" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for required checks
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          # Only reads checks, so the workflow token is enough (see permissions).
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Checks register a few seconds after the PR is opened.
+          for _ in $(seq 1 10); do
+            output=$(gh pr checks "$PR_NUMBER" --required 2>&1) && break
+            case "$output" in
+              *"no required checks"*) sleep 30 ;;
+              *) break ;;
+            esac
+          done
+          gh pr checks "$PR_NUMBER" --required --watch --interval 30
+
+      - name: Merge the promotion PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          # Never pass --delete-branch: the source branch is dev.
+          gh pr merge "$PR_NUMBER" "--$MERGE_METHOD" || gh pr merge "$PR_NUMBER" "--$MERGE_METHOD" --auto
+
+      - name: Report failure
+        if: failure() && steps.pr.outputs.number != ''
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          echo "Promotion PR #$PR_NUMBER left open, required checks did not pass. No retry." >> "$GITHUB_STEP_SUMMARY"
