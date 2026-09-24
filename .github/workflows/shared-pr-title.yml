@@ -5,6 +5,11 @@
 # base branch. It is checked with the same .commitlintrc.json as every pushed
 # commit (shared-commitlint.yml), so the rules live in one place. Callers
 # trigger it on `pull_request: types: [opened, edited, synchronize, reopened]`.
+#
+# install-dependencies: true lints from the repo root after `npm ci`, for a
+# config whose `extends` names a package from the repo's package.json
+# (@lumina-w/dev-standards). When that package is a private git+ssh
+# dependency, the caller passes DEV_STANDARDS_DEPLOY_KEY.
 
 name: PR title (reusable)
 
@@ -23,13 +28,19 @@ on:
       commitlint-version:
         type: string
         default: '21'
+      install-dependencies:
+        type: boolean
+        default: false
+    secrets:
+      DEV_STANDARDS_DEPLOY_KEY:
+        required: false
 
 permissions: {}
 
 jobs:
   pr-title:
     name: PR title (Conventional Commits)
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -44,7 +55,30 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
+      # Secrets cannot be read in `if:`, so this step reports whether the key
+      # was passed without printing it.
+      - name: Check for the deploy key
+        id: deploy-key
+        if: inputs.install-dependencies
+        env:
+          DEPLOY_KEY: ${{ secrets.DEV_STANDARDS_DEPLOY_KEY }}
+        run: echo "present=$([ -n "$DEPLOY_KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: webfactory/ssh-agent@v0.10.0
+        if: steps.deploy-key.outputs.present == 'true'
+        with:
+          ssh-private-key: ${{ secrets.DEV_STANDARDS_DEPLOY_KEY }}
+      - name: Lint the PR title with the repo's dependencies
+        if: inputs.install-dependencies
+        run: |
+          # commitlint resolves `extends` from the config file's own directory,
+          # the repo root, where npm ci installs the shared config. The CLI is
+          # added on top without touching package.json or the lockfile.
+          npm ci --ignore-scripts --no-audit --no-fund --silent
+          npm install --no-save --ignore-scripts --no-audit --no-fund --silent \
+            "@commitlint/cli@$COMMITLINT_VERSION"
+          printf '%s' "$PR_TITLE" | npx --no-install commitlint --config "$CONFIG_FILE"
       - name: Lint the PR title
+        if: ${{ !inputs.install-dependencies }}
         run: |
           # commitlint resolves `extends` from the config file's own directory,
           # so the config is linted from a scratch dir holding the packages.

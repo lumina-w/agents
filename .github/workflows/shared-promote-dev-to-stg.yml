@@ -36,7 +36,7 @@ permissions: {}
 
 jobs:
   promote:
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     concurrency:
       group: promote-${{ inputs.source-branch }}-to-${{ inputs.target-branch }}

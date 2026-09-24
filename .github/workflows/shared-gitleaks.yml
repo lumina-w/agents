@@ -27,7 +27,7 @@ permissions: {}
 jobs:
   gitleaks:
     name: Secret scan (gitleaks)
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # Listing the PR's commits needs pull-requests: read; without it the call
     # 403s with "Resource not accessible by integration".

@@ -37,7 +37,7 @@ permissions: {}
 jobs:
   analyze:
     name: analyze
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # Not blocking at workflow-run level unless asked: a failing job does not
     # turn the run red.

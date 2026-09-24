@@ -20,7 +20,7 @@ permissions: {}
 jobs:
   validate-base:
     name: PR base must follow dev -> stg -> main
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:

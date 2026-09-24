@@ -59,7 +59,7 @@ permissions: {}
 jobs:
   pip-audit:
     name: pip-audit
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     continue-on-error: ${{ !inputs.pip-audit-blocking }}
     permissions:
@@ -87,7 +87,7 @@ jobs:
 
   bandit:
     name: bandit
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # Job-level continue-on-error: even if a step exits non-zero, the check
     # shows green and the PR is not blocked (unless bandit-blocking is true).
