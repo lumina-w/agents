@@ -188,7 +188,7 @@ Lógica de CI/CD que hoy está copiada en cada repo de producto. Cada repo la ll
 
 Reglas comunes:
 
-- Todos aceptan `runner-label`. Vacío corre en `ubuntu-latest`; con valor, en el runner que tenga esa etiqueta (`runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}`).
+- Todos aceptan `runner-label`. Vacío corre en `ubuntu-latest`; con una etiqueta (`terracore-vps`), en el runner que la tenga; con un array JSON (`'["self-hosted", "build", "terracore-front"]'`), en el runner que tenga todas.
 - Versiones fijas de acciones: `actions/checkout@v7`, `actions/setup-node@v7`, `actions/setup-python@v7`, `pnpm/action-setup@v6.1.0`, `docker/build-push-action@v7`, `docker/login-action@v4`, `docker/metadata-action@v6`, `github/codeql-action@v4`.
 - Los triggers (`on:`) los pone el caller; el workflow compartido solo declara `workflow_call`.
 - Cada job declara sus permisos mínimos y el job del caller debe conceder al menos esos (un reusable no puede pedir más que su caller). Excepción: `shared-cd-docker-publish.yml` usa los del caller.
@@ -222,6 +222,12 @@ Origen: `commit-lint.yml`. Lint de Conventional Commits sobre los commits que tr
 |---|---|---|---|
 | `runner-label` | string | `''` | Etiqueta del runner |
 | `config-file` | string | `.commitlintrc.json` | Config de commitlint del repo |
+| `install-dependencies` | boolean | `false` | `true` corre `npm ci` antes del lint, para un `extends` que apunta a un paquete del `package.json` del repo (`@lumina-w/dev-standards`) |
+| `node-version` | string | `'22'` | Node para `npm ci` cuando `install-dependencies` es `true` |
+
+| Secret | Obligatorio | Uso |
+|---|---|---|
+| `DEV_STANDARDS_DEPLOY_KEY` | no | Deploy key de solo lectura para instalar `@lumina-w/dev-standards` por `git+ssh`. Solo se usa con `install-dependencies: true` |
 
 ### `shared-pr-title.yml`
 
@@ -237,6 +243,11 @@ Origen: `pr-title.yml`. Valida el título del PR (el commit que queda tras el sq
 | `config-file` | string | `.commitlintrc.json` | Config de commitlint del repo |
 | `node-version` | string | `'22'` | Node para instalar commitlint |
 | `commitlint-version` | string | `'21'` | Versión mayor de `@commitlint/cli` y `@commitlint/config-conventional` |
+| `install-dependencies` | boolean | `false` | `true` corre `npm ci` y valida desde la raíz del repo, para un `extends` que apunta a un paquete del `package.json` del repo. Solo agrega `@commitlint/cli`, sin tocar `package.json` |
+
+| Secret | Obligatorio | Uso |
+|---|---|---|
+| `DEV_STANDARDS_DEPLOY_KEY` | no | Igual que en `shared-commitlint.yml` |
 
 ### `shared-validate-pr-base.yml`
 

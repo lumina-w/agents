@@ -32,7 +32,7 @@ permissions: {}
 jobs:
   review:
     name: Claude Code Review
-    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     concurrency:
       group: claude-code-review-${{ github.ref }}
