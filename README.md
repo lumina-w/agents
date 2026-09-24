@@ -28,10 +28,10 @@ issue + label ──> dev agent ──> PR a dev ──> CI ──(verde)──>
 
 | Evento | Modo | Modelo por defecto | Turnos |
 |---|---|---|---|
-| Label `dev-ft-ready` en un issue | implement | `opus` | 40 |
+| Label `dev-ft-ready` en un issue | implement | `opus` | 80 |
 | Label `dev-ft-small` en un issue (tareas pequeñas) | implement | `sonnet` | 40 |
 | Comentario con `@claude` en un PR | iterate | `sonnet` | 40 |
-| El workflow `CI` falla en un PR con label `dev-agent` | fix | `opus` | 40 |
+| El workflow `CI` falla en un PR con label `dev-agent` | fix | `opus` | 80 |
 
 Reglas del disparo:
 
@@ -111,7 +111,7 @@ jobs:
 | `checkpoint_file` | | `.claude/CHECKPOINT.md` | Checkpoint que actualiza en cada PR (estándar de la org: dentro de `.claude/`) |
 | `base_branch` | | `dev` | Rama de la que parte y a la que abre el PR |
 | `model` / `small_model` | | `opus` / `sonnet` | Modelo normal y el de `dev-ft-small` e iterate |
-| `max_turns` / `small_max_turns` | | `40` / `40` | Turnos por modo |
+| `max_turns` / `small_max_turns` | | `80` / `40` | Turnos por modo |
 | `max_fix_rounds` | | `2` | Rondas máximas del modo fix |
 | `timeout_minutes` | | `30` | Límite del job |
 
