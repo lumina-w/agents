@@ -1,0 +1,45 @@
+# Reusable workflow: secret scan with gitleaks.
+# Origin: the gitleaks job of ci.yml (terracore-back, terracore-front).
+#
+# On pull_request the action lists the PR's commits and scans only the diff;
+# on push it scans the pushed commits. gitleaks-action requires a license for
+# org-owned repos: callers pass GITLEAKS_LICENSE. Dependabot runs read from the
+# Dependabot secret store, not the Actions one, so GITLEAKS_LICENSE has to exist
+# in BOTH or every Dependabot PR fails this job with "missing gitleaks license".
+
+name: Secret scan (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      timeout-minutes:
+        type: number
+        default: 10
+    secrets:
+      GITLEAKS_LICENSE:
+        required: false
+
+permissions: {}
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Listing the PR's commits needs pull-requests: read; without it the call
+    # 403s with "Resource not accessible by integration".
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

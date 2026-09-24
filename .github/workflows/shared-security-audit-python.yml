@@ -1,0 +1,120 @@
+# Reusable workflow: dependency audit (pip-audit) and SAST (bandit) for Python repos.
+# Origin: security.yml (terracore-back).
+#
+# pip-audit is blocking by default: without it, a PR could merge with open CVEs
+# and only GitHub's default scan would notice, which blocks nothing. bandit is
+# informational by default: findings stay in the logs and the check stays
+# green, human review handles them. Tests, migrations and virtualenvs are
+# excluded from bandit (asserts in tests and generated SQL are only noise).
+
+name: Security audit Python (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      python-version:
+        description: Python version (3.14, 3.12, ...). Leave empty to use python-version-file
+        type: string
+        default: ''
+      python-version-file:
+        description: File with the Python version (.python-version, ...)
+        type: string
+        default: ''
+      working-directory:
+        type: string
+        default: '.'
+      requirements-file:
+        description: Requirements file audited by pip-audit, relative to working-directory
+        type: string
+        default: requirements.txt
+      pip-audit-version:
+        type: string
+        default: 2.9.0
+      pip-audit-blocking:
+        type: boolean
+        default: true
+      bandit-version:
+        type: string
+        default: 1.9.4
+      bandit-path:
+        description: Path bandit scans recursively, relative to the repo root
+        type: string
+        default: '.'
+      bandit-exclude:
+        description: Comma-separated paths passed to bandit --exclude
+        type: string
+        default: '*/tests/*,*/migrations/*,*/.venv/*,*/venv/*'
+      bandit-blocking:
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  pip-audit:
+    name: pip-audit
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    continue-on-error: ${{ !inputs.pip-audit-blocking }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      PIP_AUDIT_VERSION: ${{ inputs.pip-audit-version }}
+      REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+          python-version-file: ${{ inputs.python-version-file }}
+
+      - name: Install pip-audit
+        run: pip install "pip-audit==$PIP_AUDIT_VERSION"
+
+      - name: Audit dependencies
+        continue-on-error: ${{ !inputs.pip-audit-blocking }}
+        run: pip-audit --requirement "$REQUIREMENTS_FILE" --strict --progress-spinner off
+
+  bandit:
+    name: bandit
+    runs-on: ${{ inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Job-level continue-on-error: even if a step exits non-zero, the check
+    # shows green and the PR is not blocked (unless bandit-blocking is true).
+    continue-on-error: ${{ !inputs.bandit-blocking }}
+    permissions:
+      contents: read
+    env:
+      BANDIT_PATH: ${{ inputs.bandit-path }}
+      BANDIT_VERSION: ${{ inputs.bandit-version }}
+      BANDIT_EXCLUDE: ${{ inputs.bandit-exclude }}
+      BANDIT_BLOCKING: ${{ inputs.bandit-blocking }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+          python-version-file: ${{ inputs.python-version-file }}
+
+      - name: Install bandit
+        run: pip install "bandit==$BANDIT_VERSION"
+
+      # --exit-zero backs up the informational mode in case the job's
+      # continue-on-error changes in the future.
+      - name: Run bandit
+        continue-on-error: ${{ !inputs.bandit-blocking }}
+        run: |
+          exit_zero=--exit-zero
+          if [ "$BANDIT_BLOCKING" = "true" ]; then exit_zero=; fi
+          bandit -r "$BANDIT_PATH" --exclude "$BANDIT_EXCLUDE" $exit_zero
