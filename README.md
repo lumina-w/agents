@@ -451,6 +451,12 @@ is a conflict-resolution branch whose tree matches the expected head exactly.
 Origin: `promote-dev-to-stg.yml`. Opens or reuses the promotion PR, waits for
 its required checks and merges it. One promotion at a time per branch pair.
 
+It merges with a merge commit by default, which keeps the source branch's
+history on the target. Until v4.7.0 the default was `squash`, which dropped
+that history: every later edit to lines a promotion had carried conflicted on
+the next promotion PR, and GitHub runs no checks on a conflicting PR
+(terracore-back#187, terracore-back#196). The repo must allow merge commits.
+
 - Caller trigger: `schedule` (today `0 10 * * *`) and `workflow_dispatch`
 - Permissions: `contents: read`, `pull-requests: write`, `checks: read`, `statuses: read`, `actions: read`
 - Secrets: `PROMOTE_TOKEN` (required)
@@ -460,7 +466,7 @@ its required checks and merges it. One promotion at a time per branch pair.
 | `runner-label` | string | `''` | Runner label |
 | `source-branch` | string | `dev` | Branch that is promoted |
 | `target-branch` | string | `stg` | Target branch |
-| `merge-method` | string | `squash` | `squash`, `merge` or `rebase` |
+| `merge-method` | string | `merge` | `merge`, `squash` or `rebase` |
 | `timeout-minutes` | number | `60` | Job time limit |
 
 ### `shared-claude-code-review.yml`

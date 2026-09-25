@@ -6,6 +6,11 @@
 # Callers schedule it (daily) and pass PROMOTE_TOKEN: PRs opened with the
 # default GITHUB_TOKEN do not trigger pull_request workflows, so the required
 # checks would never start. Only one promotion runs at a time per repo.
+#
+# merge-method defaults to merge: a merge commit keeps the source branch's
+# history on the target. A squash dropped it, so every later edit to lines a
+# promotion had carried conflicted on the next promotion PR, and GitHub runs
+# no checks on a conflicting PR (terracore-back#187, terracore-back#196).
 
 name: Promote dev to stg (reusable)
 
@@ -22,9 +27,9 @@ on:
         type: string
         default: stg
       merge-method:
-        description: squash, merge or rebase
+        description: merge, squash or rebase
         type: string
-        default: squash
+        default: merge
       timeout-minutes:
         type: number
         default: 60
