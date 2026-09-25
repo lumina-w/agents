@@ -1,17 +1,19 @@
 # Reusable workflow: lint the commits a push introduces against Conventional Commits.
 # Origin: commit-lint.yml, identical in every product repo.
 #
-# The action compares the push event's `before` and `after` SHAs through the
-# GitHub API, so older history is never re-checked. A brand-new branch has no
-# `before`, and then only the commits listed in the push payload are linted.
+# It runs @commitlint/cli directly (no container action), so it works on the
+# ephemeral self-hosted runners, which have no Docker daemon. The range is the
+# push event's `before..after`, so older history is never re-checked. A
+# brand-new branch (or a force push whose `before` is not an ancestor) has no
+# usable `before`: then the commits that no other branch contains are linted.
 # Rules live in the caller repo's .commitlintrc.json, the same file
 # shared-pr-title.yml checks the PR title against. Callers trigger it on
 # `push: branches: ['**']`.
 #
 # install-dependencies: true runs `npm ci` first, for a config whose `extends`
-# names a package from the repo's package.json (@lumina-w/dev-standards): the
-# action resolves it from the workspace node_modules. When that package is a
-# private git+ssh dependency, the caller passes DEV_STANDARDS_DEPLOY_KEY.
+# names a package from the repo's package.json (@lumina-w/dev-standards).
+# When that package is a private git+ssh dependency, the caller passes
+# DEV_STANDARDS_DEPLOY_KEY.
 
 name: Commit lint (reusable)
 
@@ -30,6 +32,9 @@ on:
       node-version:
         type: string
         default: '22'
+      commitlint-version:
+        type: string
+        default: '21'
     secrets:
       DEV_STANDARDS_DEPLOY_KEY:
         required: false
@@ -40,12 +45,21 @@ jobs:
   commitlint:
     name: Conventional Commits
     runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: 10
     permissions:
       contents: read
+    env:
+      CONFIG_FILE: ${{ inputs.config-file }}
+      COMMITLINT_VERSION: ${{ inputs.commitlint-version }}
+      BEFORE: ${{ github.event.before }}
+      AFTER: ${{ github.sha }}
+      BRANCH: ${{ github.ref_name }}
     steps:
+      # Full history: the range and the new-branch fallback need it.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v7
-        if: inputs.install-dependencies
         with:
           node-version: ${{ inputs.node-version }}
       # Secrets cannot be read in `if:`, so this step reports whether the key
@@ -60,11 +74,49 @@ jobs:
         if: steps.deploy-key.outputs.present == 'true'
         with:
           ssh-private-key: ${{ secrets.DEV_STANDARDS_DEPLOY_KEY }}
-      - name: Install the repo's commitlint dependencies
-        if: inputs.install-dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - uses: wagoid/commitlint-github-action@v6
-        with:
-          # The action falls back to config-conventional silently when this
-          # file is missing, so a wrong path would not fail the job.
-          configFile: ${{ inputs.config-file }}
+      - name: Resolve the commit range
+        id: range
+        run: |
+          set -euo pipefail
+          if [[ "$BEFORE" =~ ^0+$ ]] || [ -z "$BEFORE" ] \
+            || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+            || ! git merge-base --is-ancestor "$BEFORE" "$AFTER"; then
+            # New branch or rewritten history: the commits no other branch has.
+            mapfile -t others < <(git for-each-ref --format='%(refname)' refs/remotes/origin \
+              | grep -v -x -F -e "refs/remotes/origin/$BRANCH" -e refs/remotes/origin/HEAD)
+            oldest=$(git rev-list --reverse "$AFTER" --not "${others[@]}" | head -n 1)
+            if [ -z "$oldest" ]; then
+              echo "No new commits to lint."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # A root commit has no parent: lint from the start of history.
+            from=$(git rev-parse -q --verify "$oldest^" || true)
+          else
+            from=$BEFORE
+          fi
+          echo "from=$from" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Lint the commits with the repo's dependencies
+        if: inputs.install-dependencies && steps.range.outputs.skip != 'true'
+        env:
+          FROM: ${{ steps.range.outputs.from }}
+        run: |
+          [ -f "$CONFIG_FILE" ] || { echo "::error::$CONFIG_FILE not found"; exit 1; }
+          npm ci --ignore-scripts --no-audit --no-fund --silent
+          npm install --no-save --ignore-scripts --no-audit --no-fund --silent \
+            "@commitlint/cli@$COMMITLINT_VERSION"
+          npx --no-install commitlint --config "$CONFIG_FILE" ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
+      - name: Lint the commits
+        if: ${{ !inputs.install-dependencies && steps.range.outputs.skip != 'true' }}
+        env:
+          FROM: ${{ steps.range.outputs.from }}
+        run: |
+          [ -f "$CONFIG_FILE" ] || { echo "::error::$CONFIG_FILE not found"; exit 1; }
+          dir="$RUNNER_TEMP/commitlint"
+          mkdir -p "$dir"
+          cp "$CONFIG_FILE" "$dir/"
+          (cd "$dir" && npm init -y >/dev/null && npm install --no-audit --no-fund --silent \
+            "@commitlint/cli@$COMMITLINT_VERSION" "@commitlint/config-conventional@$COMMITLINT_VERSION")
+          "$dir/node_modules/.bin/commitlint" --cwd "$GITHUB_WORKSPACE" \
+            --config "$dir/$(basename "$CONFIG_FILE")" ${FROM:+--from "$FROM"} --to "$AFTER" --verbose

@@ -1,0 +1,53 @@
+# Starts a throwaway PostgreSQL server inside the job, for test suites that
+# used a `services: postgres` container. Service containers need a Docker
+# daemon, which the organization's ephemeral self-hosted runners do not have.
+# The cluster lives in $RUNNER_TEMP and dies with the job. It uses the
+# PostgreSQL binaries of the runner: the lumina-w runner image and
+# ubuntu-latest both ship PostgreSQL 16 under /usr/lib/postgresql/16/bin.
+
+name: Start PostgreSQL
+description: Start a throwaway PostgreSQL server on localhost for tests.
+
+inputs:
+  database:
+    description: Database to create.
+    required: true
+  user:
+    description: Superuser to create.
+    required: true
+  password:
+    description: Password of that user (test-only, never a real secret).
+    required: true
+  port:
+    description: TCP port on localhost.
+    default: '5432'
+  version:
+    description: Major version whose binaries to use.
+    default: '16'
+
+runs:
+  using: composite
+  steps:
+    - name: Start PostgreSQL ${{ inputs.version }}
+      shell: bash
+      env:
+        PG_DB: ${{ inputs.database }}
+        PG_USER: ${{ inputs.user }}
+        PG_PASSWORD: ${{ inputs.password }}
+        PG_PORT: ${{ inputs.port }}
+        PG_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        bin="/usr/lib/postgresql/$PG_VERSION/bin"
+        [ -x "$bin/initdb" ] || { echo "::error::PostgreSQL $PG_VERSION binaries not found in $bin"; exit 1; }
+        dir="$RUNNER_TEMP/postgres"
+        mkdir -p "$dir"
+        pwfile="$dir/pwfile"
+        printf '%s' "$PG_PASSWORD" > "$pwfile"
+        "$bin/initdb" -D "$dir/data" -U "$PG_USER" --pwfile="$pwfile" \
+          --auth-local=trust --auth-host=scram-sha-256 >/dev/null
+        rm -f "$pwfile"
+        "$bin/pg_ctl" -D "$dir/data" -l "$dir/server.log" -w \
+          -o "-c listen_addresses=localhost -p $PG_PORT -k $dir" start
+        "$bin/createdb" -h "$dir" -p "$PG_PORT" -U "$PG_USER" "$PG_DB"
+        "$bin/pg_isready" -h localhost -p "$PG_PORT"

@@ -11,6 +11,10 @@ name: Auto-merge into dev (reusable)
 
 on:
   workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
     secrets:
       PROMOTE_TOKEN:
         required: true
@@ -24,7 +28,7 @@ jobs:
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}

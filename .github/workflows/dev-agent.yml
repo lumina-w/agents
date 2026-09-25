@@ -36,6 +36,9 @@ name: Dev agent (reusable)
 on:
   workflow_call:
     inputs:
+      runner-label:
+        type: string
+        default: ''
       toolchain:
         description: "python | npm | pnpm | none"
         type: string
@@ -113,7 +116,7 @@ on:
 
 jobs:
   agent:
-    runs-on: ubuntu-latest
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     concurrency:
       group: dev-agent-${{ github.repository }}-${{ github.event.issue.number || github.event.workflow_run.head_branch }}

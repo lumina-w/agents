@@ -8,6 +8,9 @@ name: Delete merged branches (reusable)
 on:
   workflow_call:
     inputs:
+      runner-label:
+        type: string
+        default: ''
       dry_run:
         type: boolean
         default: false
@@ -17,7 +20,7 @@ on:
 
 jobs:
   sweep:
-    runs-on: ubuntu-latest
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
     permissions:
       contents: write
       pull-requests: read

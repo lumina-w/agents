@@ -39,6 +39,10 @@ the personal Claude Code configuration belongs to `wavival-coding-config`.
 | `shared-gitleaks.yml` | Secret scan of the PR diff or the pushed commits. | In use by 2 repos |
 | `shared-cd-docker-publish.yml` | Builds a Docker image, scans it with Trivy, pushes it to GHCR and optionally sends a `repository_dispatch`. | In use by 2 repos |
 
+| Action | Purpose | Status |
+|---|---|---|
+| `.github/actions/start-postgres` | Starts a throwaway PostgreSQL server inside the job, replacing `services: postgres` on runners without a Docker daemon. | New, for terracore-back's test jobs |
+
 The ten `shared-*.yml` workflows were added by agents#13 (released as
 `v4.4.0`) and extended by agents#14 (runner label arrays and repo commitlint
 dependencies, `v4.5.0`). Both PRs are merged.
@@ -131,16 +135,23 @@ Rules that apply to every workflow:
 
 ### Runner selection (`runner-label`)
 
-Every `shared-*.yml` accepts `runner-label`:
+Every `shared-*.yml`, `dev-agent.yml`, `automerge-dev.yml` and
+`delete-merged-branches.yml` accept `runner-label`:
 
 | Value | Runs on |
 |---|---|
 | empty (default) | `ubuntu-latest` |
 | a label, e.g. `terracore-vps` | the self-hosted runner with that label |
-| a JSON array, e.g. `'["self-hosted", "build", "terracore-front"]'` | a runner that has all those labels |
+| a JSON array, e.g. `'["self-hosted", "build", "lumina-w"]'` | a runner that has all those labels |
 
-`dev-agent.yml`, `automerge-dev.yml`, `delete-merged-branches.yml` and
-`docs-sync.yml` have no runner input: they always run on `ubuntu-latest`.
+`docs-sync.yml` has no runner input: it always runs on `ubuntu-latest`.
+
+The organization's ephemeral runners carry `["self-hosted", "build", "lumina-w"]`:
+one single-use runner per job in a rootless Docker container on the build VPS,
+with no Docker daemon inside the job, no `sudo` and one job at a time for the
+whole organization. A job can only use them if it needs no `services:`,
+`container:`, container actions (`runs: using: docker`) or `apt-get`, and
+only the tools the runner image ships.
 
 ### Secrets by workflow
 
@@ -257,6 +268,7 @@ both.
 | `max_turns` / `small_max_turns` | | `80` / `40` | Turn limit per size |
 | `max_fix_rounds` | | `2` | Maximum fix rounds per PR |
 | `timeout_minutes` | | `30` | Job time limit |
+| `runner-label` | | `''` | Runner label, see [Runner selection](#runner-selection-runner-label). Empty runs on `ubuntu-latest` |
 
 ### Callers today
 
@@ -289,7 +301,7 @@ auto-merge: branch protection holds the merge until the required checks pass,
 so `dev` must be protected with required checks. Uses `PROMOTE_TOKEN`, not the
 workflow token, so the push to `dev` triggers the repo's workflows. The dev
 agent's PRs are drafts until the workflow marks them ready, so the caller must
-also trigger on `ready_for_review`.
+also trigger on `ready_for_review`. Input: `runner-label` (`''`).
 
 ### `delete-merged-branches.yml`
 
@@ -297,7 +309,7 @@ Deletes remote branches whose PR was merged into `base_branch` (`dev` by
 default), only when the branch tip is still the PR head (a reused branch name
 with new commits is kept). Never deletes `dev`, `stg`, `main`, the default
 branch, protected branches or branches with an open PR. Inputs: `dry_run`
-(`false`), `base_branch` (`dev`). Callers schedule it every 12 hours because
+(`false`), `base_branch` (`dev`), `runner-label` (`''`). Callers schedule it every 12 hours because
 "Automatically delete head branches" is not reliable with auto-merge.
 
 <!-- docs-sync:start -->
@@ -347,16 +359,18 @@ Third-party actions are pinned: `actions/checkout@v7`,
 `actions/setup-node@v7`, `actions/setup-python@v7`, `pnpm/action-setup@v6.1.0`,
 `docker/build-push-action@v7`, `docker/login-action@v4`,
 `docker/metadata-action@v6`, `github/codeql-action@v4`,
-`webfactory/ssh-agent@v0.10.0`, `wagoid/commitlint-github-action@v6`,
+`webfactory/ssh-agent@v0.10.0`,
 `gitleaks/gitleaks-action@v3`, `anthropics/claude-code-action@v1`,
 `peter-evans/repository-dispatch@v4` and `aquasecurity/trivy-action` by
 commit SHA (v0.36.0).
 
 ### `shared-commitlint.yml`
 
-Origin: `commit-lint.yml`. Lints the commits each push introduces (the
-action compares the push's `before` and `after`; a new branch lints the
-commits in the push payload) against the caller repo's `.commitlintrc.json`.
+Origin: `commit-lint.yml`. Lints the commits each push introduces
+(`before..after`; a new branch, or a force push whose `before` is not an
+ancestor, lints the commits no other branch contains) against the caller
+repo's `.commitlintrc.json`. It runs `@commitlint/cli` directly instead of a
+container action, so it also runs on the ephemeral self-hosted runners.
 
 - Caller trigger: `push: branches: ['**']`
 - Permissions: `contents: read`
@@ -365,9 +379,10 @@ commits in the push payload) against the caller repo's `.commitlintrc.json`.
 | Input | Type | Default | Use |
 |---|---|---|---|
 | `runner-label` | string | `''` | Runner label |
-| `config-file` | string | `.commitlintrc.json` | commitlint config of the repo. The action falls back to config-conventional silently if the file is missing |
+| `config-file` | string | `.commitlintrc.json` | commitlint config of the repo. The job fails if the file is missing |
 | `install-dependencies` | boolean | `false` | `true` runs `npm ci` first, for an `extends` that names a package from the repo's `package.json` (`@lumina-w/dev-standards`) |
-| `node-version` | string | `'22'` | Node for `npm ci` when `install-dependencies` is `true` |
+| `node-version` | string | `'22'` | Node used to install and run commitlint |
+| `commitlint-version` | string | `'21'` | Major version of `@commitlint/cli` (and `@commitlint/config-conventional` without `install-dependencies`) |
 
 | Secret | Required | Use |
 |---|---|---|
@@ -596,6 +611,34 @@ jobs:
         API_URL=${{ secrets.API_URL }}
 ```
 <!-- shared-workflows:end -->
+
+## Actions
+
+### `start-postgres`
+
+Composite action for test jobs that used a `services: postgres` container,
+which needs a Docker daemon the organization's ephemeral runners do not have.
+It runs `initdb` and `pg_ctl` from `/usr/lib/postgresql/<version>/bin` (the
+lumina-w runner image and `ubuntu-latest` both ship PostgreSQL 16), with the
+cluster in `$RUNNER_TEMP`, listening on `localhost:<port>` with password
+authentication, and creates the database.
+
+```yaml
+steps:
+  - uses: lumina-w/agents/.github/actions/start-postgres@v4
+    with:
+      database: test_db
+      user: test_user
+      password: test_pass
+```
+
+| Input | Required | Default | Use |
+|---|---|---|---|
+| `database` | yes | | Database to create |
+| `user` | yes | | Superuser to create |
+| `password` | yes | | Its password. Test-only, never a real secret |
+| `port` | | `'5432'` | TCP port on `localhost` |
+| `version` | | `'16'` | Major version whose binaries to use |
 
 ## Relationship with dev-standards
 
