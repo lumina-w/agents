@@ -71,7 +71,7 @@ git push -f origin v4
   (agents#9) is that it has no tag of its own and rides with the next
   release.
 
-Current tags: `v4.0.0` through `v4.6.0`; `v4` points to `v4.6.0`. `v2` and
+Current tags: `v4.0.0` through `v4.7.0`; `v4` points to `v4.7.0`. `v2` and
 `v3` still exist and have no callers in the organization.
 
 ## Secrets

@@ -6,8 +6,8 @@ nothing by itself. Each product repo (and each `<project>-docs` repo) keeps a
 thin caller that sets the triggers and calls the workflow pinned to the major
 tag, so the logic lives once, here.
 
-- **Current version:** `v4`, which points to `v4.5.0` (commit `eee36e2`,
-  agents#14). See [Versioning](#versioning).
+- **Current version:** `v4`, which points to `v4.7.0` (commit `65812d6`,
+  agents#21). See [Versioning](#versioning).
 - **Visibility:** private. Only repos of the organization can call these
   workflows.
 - **Docs in this repo:**
@@ -689,7 +689,10 @@ ride with the next release.
 Rollback: move `v4` back to the previous `v4.Y.Z`.
 
 Tags today: `v4.0.0`, `v4.1.0`, `v4.1.1`, `v4.2.0`, `v4.2.1`, `v4.3.0`,
-`v4.4.0` (shared workflows, agents#13), `v4.5.0` (agents#14, current `v4`).
+`v4.4.0` (shared workflows, agents#13), `v4.5.0` (agents#14), `v4.6.0`
+(commitlint without a container, Dependabot PR titles and docs-sync fixes;
+agents#16 to #20), `v4.7.0` (Dependabot commits in commit lint, agents#21,
+current `v4`).
 The older majors `v2` and `v3` still exist; no caller in the organization uses
 them.
 
