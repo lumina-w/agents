@@ -192,6 +192,13 @@ The caller job must grant `contents: write`, `pull-requests: write`,
 | `DOCS_SOURCES_READ_TOKEN` | no | Clones `<project>-docs` as read-only context |
 | `PROMOTE_TOKEN` | no, but needed for the full flow | Commits the checkpoint and marks the PR ready, so checks and auto-merge run |
 
+### Runner
+
+`runner-label` (default `''`, `ubuntu-latest`) picks the runner, with the same
+values as the `shared-*.yml` workflows (see the README). On the organization's
+ephemeral runners the run holds the only job slot for up to `timeout_minutes`,
+and the runner image must ship `gh` and the repo's toolchain.
+
 ### Where to look when it did not run
 
 The first step prints why it skipped, in Spanish, and the run summary says
