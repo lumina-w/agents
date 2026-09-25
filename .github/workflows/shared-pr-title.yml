@@ -10,6 +10,11 @@
 # config whose `extends` names a package from the repo's package.json
 # (@lumina-w/dev-standards). When that package is a private git+ssh
 # dependency, the caller passes DEV_STANDARDS_DEPLOY_KEY.
+#
+# PRs opened by dependabot[bot] are linted without the header length rules
+# (header-max-length and dev-standards' header-max-length-no-pr-suffix):
+# Dependabot writes those titles, often past 72 characters. Every other rule
+# still applies to them, and PRs opened by anyone else are linted as is.
 
 name: PR title (reusable)
 
@@ -48,6 +53,7 @@ jobs:
       # Passed through the environment, never interpolated into the script,
       # so a crafted title cannot inject shell.
       PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
       CONFIG_FILE: ${{ inputs.config-file }}
       COMMITLINT_VERSION: ${{ inputs.commitlint-version }}
     steps:
@@ -67,7 +73,8 @@ jobs:
         if: steps.deploy-key.outputs.present == 'true'
         with:
           ssh-private-key: ${{ secrets.DEV_STANDARDS_DEPLOY_KEY }}
-      - name: Lint the PR title with the repo's dependencies
+      - name: Install commitlint with the repo's dependencies
+        id: deps
         if: inputs.install-dependencies
         run: |
           # commitlint resolves `extends` from the config file's own directory,
@@ -76,8 +83,10 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund --silent
           npm install --no-save --ignore-scripts --no-audit --no-fund --silent \
             "@commitlint/cli@$COMMITLINT_VERSION"
-          printf '%s' "$PR_TITLE" | npx --no-install commitlint --config "$CONFIG_FILE"
-      - name: Lint the PR title
+          echo "dir=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "config=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+      - name: Install commitlint
+        id: scratch
         if: ${{ !inputs.install-dependencies }}
         run: |
           # commitlint resolves `extends` from the config file's own directory,
@@ -89,4 +98,31 @@ jobs:
           npm init -y >/dev/null
           npm install --no-audit --no-fund --silent \
             "@commitlint/cli@$COMMITLINT_VERSION" "@commitlint/config-conventional@$COMMITLINT_VERSION"
-          printf '%s' "$PR_TITLE" | npx --no-install commitlint --config "$(basename "$CONFIG_FILE")"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "config=$(basename "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
+      - name: Lint the PR title
+        env:
+          LINT_DIR: ${{ steps.deps.outputs.dir || steps.scratch.outputs.dir }}
+          LINT_CONFIG: ${{ steps.deps.outputs.config || steps.scratch.outputs.config }}
+        run: |
+          cd "$LINT_DIR"
+          config="$LINT_CONFIG"
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            # A config next to the repo's one that extends it and turns off
+            # only the header length rules the resolved config defines.
+            relaxed="$(dirname "$config")/.commitlintrc.dependabot-title.json"
+            npx --no-install commitlint --config "$config" --print-config json \
+              | BASE="./$(basename "$config")" node -e '
+                  let raw = "";
+                  process.stdin.on("data", (c) => { raw += c; });
+                  process.stdin.on("end", () => {
+                    const rules = {};
+                    for (const name of Object.keys(JSON.parse(raw).rules || {})) {
+                      if (name.startsWith("header-max-length")) rules[name] = [0];
+                    }
+                    process.stdout.write(JSON.stringify({ extends: [process.env.BASE], rules }));
+                  });' > "$relaxed"
+            echo "Dependabot PR: header length rules off ($(cat "$relaxed"))."
+            config="$relaxed"
+          fi
+          printf '%s' "$PR_TITLE" | npx --no-install commitlint --config "$config"

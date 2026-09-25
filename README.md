@@ -360,6 +360,16 @@ Origin: `pr-title.yml`. PRs are squash-merged, so the title becomes the commit
 on the base branch; it is linted with the same `.commitlintrc.json`. The title
 is passed through the environment, never interpolated into the script.
 
+PRs opened by `dependabot[bot]` (the PR author) are linted without the header
+length rules the resolved config defines: `header-max-length`, and
+`header-max-length-no-pr-suffix` in repos that extend `@lumina-w/dev-standards`.
+Dependabot writes those titles and they often pass 72 characters (okroot-page's
+group bumps reach 78). The job writes `.commitlintrc.dependabot-title.json` next
+to the config, extending it and turning off only those rules, so type, scope and
+the rest still apply. PRs opened by anyone else are linted as is.
+`shared-commitlint.yml` has no such exemption yet: Dependabot's commits are
+still linted with every rule on push.
+
 - Caller trigger: `pull_request: types: [opened, edited, synchronize, reopened]`
 - Permissions: `contents: read`
 - Check: `PR title (Conventional Commits)`
