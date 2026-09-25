@@ -39,6 +39,10 @@ the personal Claude Code configuration belongs to `wavival-coding-config`.
 | `shared-gitleaks.yml` | Secret scan of the PR diff or the pushed commits. | In use by 2 repos |
 | `shared-cd-docker-publish.yml` | Builds a Docker image, scans it with Trivy, pushes it to GHCR and optionally sends a `repository_dispatch`. | In use by 2 repos |
 
+| Action | Purpose | Status |
+|---|---|---|
+| `.github/actions/start-postgres` | Starts a throwaway PostgreSQL server inside the job, replacing `services: postgres` on runners without a Docker daemon. | New, for terracore-back's test jobs |
+
 The ten `shared-*.yml` workflows were added by agents#13 (released as
 `v4.4.0`) and extended by agents#14 (runner label arrays and repo commitlint
 dependencies, `v4.5.0`). Both PRs are merged.
@@ -564,6 +568,34 @@ jobs:
         API_URL=${{ secrets.API_URL }}
 ```
 <!-- shared-workflows:end -->
+
+## Actions
+
+### `start-postgres`
+
+Composite action for test jobs that used a `services: postgres` container,
+which needs a Docker daemon the organization's ephemeral runners do not have.
+It runs `initdb` and `pg_ctl` from `/usr/lib/postgresql/<version>/bin` (the
+lumina-w runner image and `ubuntu-latest` both ship PostgreSQL 16), with the
+cluster in `$RUNNER_TEMP`, listening on `localhost:<port>` with password
+authentication, and creates the database.
+
+```yaml
+steps:
+  - uses: lumina-w/agents/.github/actions/start-postgres@v4
+    with:
+      database: test_db
+      user: test_user
+      password: test_pass
+```
+
+| Input | Required | Default | Use |
+|---|---|---|---|
+| `database` | yes | | Database to create |
+| `user` | yes | | Superuser to create |
+| `password` | yes | | Its password. Test-only, never a real secret |
+| `port` | | `'5432'` | TCP port on `localhost` |
+| `version` | | `'16'` | Major version whose binaries to use |
 
 ## Relationship with dev-standards
 
