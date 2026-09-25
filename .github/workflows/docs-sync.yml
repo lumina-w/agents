@@ -196,6 +196,9 @@ jobs:
           chmod -R a-w "$SRC"
           echo "dir=$SRC" >> "$GITHUB_OUTPUT"
           cp "$RUNNER_TEMP/manifest.json" .docs-sync/manifest.json
+          # The previous report goes away, so the one found after Claude runs
+          # is always this run's.
+          rm -f .docs-sync/last-report.md
 
       - name: Update docs with Claude
         if: steps.sources.outputs.claude == 'true'
@@ -306,11 +309,13 @@ jobs:
               if prev_body.strip() != body.strip():
                   place("checkpoint", f"# {disp} - Checkpoint\n\n> Última actualización: {today}\n> Copia del checkpoint de cada repo fuente, generada por el sync. Si difiere, manda el del repo.\n\n{body}")
           rep = ".docs-sync/last-report.md"
-          auto = f"\n## Generado por script\n\n- Modo: {os.environ['MODE']}\n- Docs revisados por Claude: {os.environ['AFFECTED'] or 'ninguno'}\n- Docs generados por script: {', '.join(done) or 'ninguno'}\n"
-          if os.environ["CLAUDE_RAN"] == "true" and os.path.exists(rep):
+          auto = f"\n## Generado por script\n\n- Modo: {os.environ['MODE']}\n- Docs asignados a Claude: {os.environ['AFFECTED'] or 'ninguno'}\n- Docs generados por script: {', '.join(done) or 'ninguno'}\n"
+          if os.environ["CLAUDE_RAN"] != "true":
+              open(rep, "w").write(f"# Sync {today}\n\nSin cambios que requieran a Claude (sin commits relevantes o solo dependencias).\n{auto}")
+          elif os.path.exists(rep):
               open(rep, "a").write(auto)
           else:
-              open(rep, "w").write(f"# Sync {today}\n\nSin cambios que requieran a Claude (sin commits relevantes o solo dependencias).\n{auto}")
+              open(rep, "w").write(f"# Sync {today}\n\nClaude corrió pero no escribió este reporte. Revisa el log del job y el diff de este sync para ver qué docs cambió.\n{auto}")
           PY
           dups=$(ls *.md 2>/dev/null | grep -E -- '-[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$' | sed -E 's/-[0-9]{4}-[0-9]{2}-[0-9]{2}\.md$//' | sort | uniq -d || true)
           if [ -n "$dups" ]; then echo "Tipos duplicados: $dups"; exit 1; fi
