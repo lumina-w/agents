@@ -300,11 +300,13 @@ and also accept `workflow_dispatch` with `force`.
 |---|---|---|
 | No new commits | Nothing runs | |
 | Dependency bumps only (Dependabot, lockfiles) | Changelog and status updated by script | |
-| Code commits | Script builds `changelog` (from `git log`) and `checkpoint` (from each repo's `.claude/CHECKPOINT.md`). Claude gets `_changes.md` with the diff and updates only the affected docs | `sonnet`, 40 turns |
+| Code commits | Script builds `changelog` (from `git log`) and `checkpoint` (from each repo's `.claude/CHECKPOINT.md`). Claude gets `_changes.md` with the diff and updates only the affected docs | `sonnet`, 70 turns |
 | Full audit: `full_audit_weekday` (Sunday in all three configs), first sync of a repo, or `force: true` | Claude reviews every managed doc | `opus`, 150 turns |
 
 - The `opus` and `sonnet` aliases resolve to the latest model that
   `CLAUDE_CODE_OAUTH_TOKEN` can use.
+- The incremental limit was 40 turns until v4.6.0. The scheduled run of
+  luminaw-docs on 2026-09-24 needed 53 and failed, so it is 70 now.
 - Optional inputs `model` and `max_turns` override both modes. `auto_merge`
   (`true`) and `config_path` (`docs-sync.config.yml`) are also inputs.
 - Guards: only root `.md` files of the docs repo; Claude cannot touch

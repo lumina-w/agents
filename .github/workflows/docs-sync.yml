@@ -12,7 +12,8 @@
 #   - changelog and checkpoint are always built by script (git log and each
 #     repo's .claude/CHECKPOINT.md), never by Claude.
 #   - Incremental run: Claude gets a precomputed diff (_changes.md) and the list
-#     of the only docs it may touch, on the `sonnet` alias with 40 turns.
+#     of the only docs it may touch, on the `sonnet` alias with 70 turns
+#     (40 until v4.6.0; an incremental run in luminaw-docs needed 53).
 #   - Full audit (force, first sync of a repo, or weekly on the configured
 #     weekday): every managed doc, on the `opus` alias with 150 turns.
 #   Aliases resolve to the latest model the OAuth token can use.
@@ -41,7 +42,7 @@ on:
         type: string
         default: ""
       max_turns:
-        description: Override the turn limit for any mode (0 = 40 incremental, 150 full)
+        description: Override the turn limit for any mode (0 = 70 incremental, 150 full)
         type: number
         default: 0
     secrets:
@@ -180,7 +181,7 @@ jobs:
                           affected.append(d)
           mode = "full" if full else "incremental"
           model = os.environ.get("MODEL") or ("opus" if full else "sonnet")
-          turns = int(float(os.environ.get("MAX_TURNS") or 0)) or (150 if full else 40)
+          turns = int(float(os.environ.get("MAX_TURNS") or 0)) or (150 if full else 70)
           json.dump(manifest, open(f"{T}/manifest.json", "w"), indent=2)
           json.dump(commits_all, open(f"{T}/commits.json", "w"), indent=2)
           with open(f"{SRC}/_changes.md", "w") as fh:
