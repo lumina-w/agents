@@ -323,6 +323,11 @@ and also accept `workflow_dispatch` with `force`.
   luminaw-docs on 2026-09-24 needed 53 and failed, so it is 70 now.
 - Optional inputs `model` and `max_turns` override both modes. `auto_merge`
   (`true`) and `config_path` (`docs-sync.config.yml`) are also inputs.
+- Report: `.docs-sync/last-report.md` is written by Claude, followed by a
+  section written by the script. Each run starts without the previous report.
+  If Claude runs but writes none, the script says so, instead of reporting
+  "no changes that need Claude" next to the docs assigned to Claude. The sync
+  of 2026-09-23 in luminaw-docs produced that contradiction before v4.6.0.
 - Guards: only root `.md` files of the docs repo; Claude cannot touch
   `changelog`, `checkpoint` or protected docs; one current file per doc type.
 - Publishing: a PR with auto-merge, or a direct push to the docs repo's
