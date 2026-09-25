@@ -66,12 +66,23 @@ is the default branch of all product repos, so scheduled callers run from it.
 | `shared-cd-docker-publish.yml` | okroot-back (`cd-staging.yml`, `cd-production.yml`), okroot-front (`docker-build-push.yml`) |
 | `docs-sync.yml` | terracore-docs, okroot-docs, luminaw-docs (`docs-daily-sync.yml`, `0 11 * * *`, 06:00 in Bogotá) |
 
+Exceptions to `@v4` and to `ubuntu-latest` in the table above:
+
+- terracore-page's `commit-lint.yml` calls
+  `shared-commitlint.yml@feat/self-hosted-runner-support` with
+  `runner-label: '["self-hosted", "build", "lumina-w"]'` on `dev`, `stg` and
+  `main`. It is the test caller of agents#17, merged as `dffd129`. It breaks
+  if that branch is deleted before the caller goes back to `@v4`.
+- terracore-back passes `runner-label: '["self-hosted", "build", "lumina-w"]'`
+  in `ci.yml` (gitleaks), `codeql.yml`, `pr-title.yml`, `security.yml` and
+  `validate-pr-base.yml`, on `dev` only (terracore-back#189).
+
 State of `main` in the product repos (it only changes with each
 `stg -> main` promotion):
 
-- terracore-front, terracore-page: same callers as `dev`.
-- terracore-back: only `dev-agent.yml`, `automerge-dev.yml` and
-  `delete-merged-branches.yml`.
+- terracore-back, terracore-front, terracore-page: same callers as `dev`
+  (10, 10 and 9). terracore-back's `main` caught up with the
+  `stg -> main` promotion of 2026-09-25.
 - okroot-back, okroot-front, okroot-page, blog-w, luminaw-page: no callers
   yet; `main` still has the per-repo workflows from before the migration.
 
@@ -220,8 +231,11 @@ jobs:
         npm run build
 ```
 
-A repo without a workflow named `CI` (today luminaw-page) drops the
-`workflow_run` trigger and has no fix mode.
+Fix mode needs both a workflow named `CI` and the `workflow_run` trigger in
+the caller. luminaw-page has a `CI` workflow (`ci.yml` on `dev` and `stg`, not
+yet on `main`), but its `claude.yml` only listens to `issues` and
+`issue_comment`, so it still has no fix mode. The other seven callers have
+both.
 
 ### Inputs
 
@@ -299,7 +313,7 @@ and also accept `workflow_dispatch` with `force`.
 | Case | What happens | Model |
 |---|---|---|
 | No new commits | Nothing runs | |
-| Dependency bumps only (Dependabot, lockfiles) | Changelog and status updated by script | |
+| Dependency bumps only (Dependabot, lockfiles) | No Claude. Script updates `changelog` (one row per repo with the count of bumps) and `checkpoint` | |
 | Code commits | Script builds `changelog` (from `git log`) and `checkpoint` (from each repo's `.claude/CHECKPOINT.md`). Claude gets `_changes.md` with the diff and updates only the affected docs | `sonnet`, 70 turns |
 | Full audit: `full_audit_weekday` (Sunday in all three configs), first sync of a repo, or `force: true` | Claude reviews every managed doc | `opus`, 150 turns |
 
@@ -435,9 +449,21 @@ the same ref cancels the review in progress.
 
 ### `shared-codeql.yml`
 
-Origin: `codeql.yml` (terracore-*). CodeQL for one language. Informational by
-default: if the analysis or the SARIF upload fail (for example, Code Security
-disabled on a private repo), the check stays green.
+Origin: `codeql.yml` (terracore-*). CodeQL for one language. What happens
+when something fails depends on `blocking` and on the step:
+
+- `Perform CodeQL Analysis` (analysis and SARIF upload) has
+  `continue-on-error: ${{ !inputs.blocking }}`. With `blocking: false` (the
+  default, terracore-back and terracore-front) a failure there, such as
+  "Code Security must be enabled for this repository to use code scanning" on
+  a private repo without it, leaves the `analyze` check green.
+- With `blocking: true` the same failure turns the check red. terracore-page
+  passes `blocking: true`. Its only run, by hand on 2026-09-25, failed in that
+  step with that error.
+- Checkout and `Initialize CodeQL` have no step-level `continue-on-error`. A
+  failure there turns the `analyze` check red even with `blocking: false`;
+  the job-level `continue-on-error` only keeps the workflow run itself from
+  failing.
 
 - Caller trigger: `push`/`pull_request` to `main`, `stg`, `dev` and `schedule`, or only `workflow_dispatch` in repos without GHAS (terracore-page)
 - Permissions: `security-events: write`, `actions: read`, `contents: read`
@@ -577,8 +603,10 @@ branch chain; this repo runs checks in CI.
   loading `DEV_STANDARDS_DEPLOY_KEY` with `webfactory/ssh-agent`, so a config
   that extends `@lumina-w/dev-standards/commitlint` resolves. The caller
   still has to carry a `package.json`, a lockfile and the deploy key. Only
-  terracore-back does this; the other seven repos lint against a local copy
-  of the same rules.
+  terracore-back does this. The other seven repos lint against a local copy
+  of the rules as they were in dev-standards 0.1.0: no `billing` scope, and
+  the ` (#<number>)` a squash merge appends counts toward the 72 characters
+  (0.2.0 stops counting it).
 - **Pending design, not implemented.** The two workflows would install
   dev-standards themselves with the deploy key, so a consumer would need only
   the one-line `.commitlintrc.json` and the install logic would live here once.
