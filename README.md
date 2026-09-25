@@ -1,63 +1,189 @@
 # agents
+
+Central repo of reusable GitHub Actions workflows for the `lumina-w`
+organization. Every workflow here declares only `on: workflow_call`: it does
+nothing by itself. Each product repo (and each `<project>-docs` repo) keeps a
+thin caller that sets the triggers and calls the workflow pinned to the major
+tag, so the logic lives once, here.
+
+- **Current version:** `v4`, which points to `v4.5.0` (commit `eee36e2`,
+  agents#14). See [Versioning](#versioning).
+- **Visibility:** private. Only repos of the organization can call these
+  workflows.
+- **Docs in this repo:**
+  - `README.md` (this file): what each workflow does, who uses it, how to call it.
+  - [`AGENTS.md`](AGENTS.md): the dev agent in detail (modes, layers, guardrails, checkpoint).
+  - [`CONTRIBUTING.md`](CONTRIBUTING.md): how to change a workflow, test it and release it.
+
+What does not live here: the git conventions (commit format, scopes,
+`dev -> stg -> main` rules) belong to
+[`@lumina-w/dev-standards`](https://github.com/lumina-w/dev-standards), and
+the personal Claude Code configuration belongs to `wavival-coding-config`.
+
+## Catalog
+
+| Workflow | Purpose | Status |
+|---|---|---|
+| `dev-agent.yml` | Claude dev agent: implements labeled issues, iterates on `@claude` comments, fixes its own PRs when CI fails. Opens PRs against `dev`, never merges. | In use by the 8 product repos |
+| `automerge-dev.yml` | Arms squash auto-merge on every non-draft PR into `dev` (not forks, not Dependabot). | In use by the 8 product repos |
+| `delete-merged-branches.yml` | Deletes remote branches whose PR was merged into `dev`, when the branch tip is still the PR head. | In use by the 8 product repos |
+| `docs-sync.yml` | Daily sync of a `<project>-docs` repo from the `dev` branch of its source repos. | In use by the 3 docs repos |
+| `shared-commitlint.yml` | Conventional Commits lint of the commits each push introduces. | In use by the 8 product repos |
+| `shared-pr-title.yml` | Conventional Commits lint of the PR title (the squash commit). | In use by the 8 product repos |
+| `shared-validate-pr-base.yml` | Enforces the PR direction `dev -> stg -> main`. | In use by the 8 product repos |
+| `shared-promote-dev-to-stg.yml` | Opens or reuses the `dev -> stg` promotion PR, waits for its required checks and merges it. | In use by the 8 product repos |
+| `shared-claude-code-review.yml` | Claude code review with inline comments on the PR. | In use by 5 repos |
+| `shared-codeql.yml` | CodeQL analysis for one language, informational by default. | In use by 3 repos |
+| `shared-security-audit-node.yml` | `npm audit` or `pnpm audit`, informational by default. | In use by 3 repos |
+| `shared-security-audit-python.yml` | `pip-audit` (blocking by default) and `bandit` (informational by default). | In use by 1 repo |
+| `shared-gitleaks.yml` | Secret scan of the PR diff or the pushed commits. | In use by 2 repos |
+| `shared-cd-docker-publish.yml` | Builds a Docker image, scans it with Trivy, pushes it to GHCR and optionally sends a `repository_dispatch`. | In use by 2 repos |
+
+The ten `shared-*.yml` workflows were added by agents#13 (released as
+`v4.4.0`) and extended by agents#14 (runner label arrays and repo commitlint
+dependencies, `v4.5.0`). Both PRs are merged.
+
+## Who calls what
+
+Verified on 2026-09-25 by reading the `uses: lumina-w/agents/...@v4` lines on
+the `dev`, `stg` and `main` branches of every repo in the organization. `dev`
+is the default branch of all product repos, so scheduled callers run from it.
+
+| Workflow | Callers (on `dev` and `stg`) |
+|---|---|
+| `dev-agent.yml` | terracore-back, terracore-front, terracore-page, okroot-back, okroot-front, okroot-page, blog-w, luminaw-page (`claude.yml`) |
+| `automerge-dev.yml` | the same 8 (`automerge-dev.yml`) |
+| `delete-merged-branches.yml` | the same 8 (`delete-merged-branches.yml`, `30 4,16 * * *`) |
+| `shared-commitlint.yml` | the same 8 (`commit-lint.yml`); terracore-back with `install-dependencies: true` |
+| `shared-pr-title.yml` | the same 8 (`pr-title.yml`); terracore-back with `install-dependencies: true` |
+| `shared-validate-pr-base.yml` | the same 8 (`validate-pr-base.yml`) |
+| `shared-promote-dev-to-stg.yml` | the same 8 (`promote-dev-to-stg.yml`, `0 10 * * *`) |
+| `shared-claude-code-review.yml` | okroot-back, okroot-front, okroot-page, blog-w, luminaw-page (`claude-code-review.yml`) |
+| `shared-codeql.yml` | terracore-back, terracore-front (`codeql.yml`, Mondays 06:00 UTC plus push/PR), terracore-page (`codeql.yml`, `workflow_dispatch` only) |
+| `shared-security-audit-node.yml` | terracore-front (`security.yml`), terracore-page (`ci.yml`), okroot-page (`ci.yml`) |
+| `shared-security-audit-python.yml` | terracore-back (`security.yml`) |
+| `shared-gitleaks.yml` | terracore-back (`ci.yml`), terracore-front (`ci.yml`, on the self-hosted runner `["self-hosted", "build", "terracore-front"]`) |
+| `shared-cd-docker-publish.yml` | okroot-back (`cd-staging.yml`, `cd-production.yml`), okroot-front (`docker-build-push.yml`) |
+| `docs-sync.yml` | terracore-docs, okroot-docs, luminaw-docs (`docs-daily-sync.yml`, `0 11 * * *`, 06:00 in Bogotá) |
+
+State of `main` in the product repos (it only changes with each
+`stg -> main` promotion):
+
+- terracore-front, terracore-page: same callers as `dev`.
+- terracore-back: only `dev-agent.yml`, `automerge-dev.yml` and
+  `delete-merged-branches.yml`.
+- okroot-back, okroot-front, okroot-page, blog-w, luminaw-page: no callers
+  yet; `main` still has the per-repo workflows from before the migration.
+
+Logic that still lives as a per-repo copy although a shared workflow exists:
+the Docker publish job of terracore-front (`cd-staging.yml`,
+`cd-production.yml`).
+
+`wavival/wavival.dev` is in the personal account, not in the organization,
+and does not call any of these workflows.
+
+## Calling a workflow
+
+The caller lives in the consumer repo's `.github/workflows/`, sets the
+triggers and pins the major tag:
+
+```yaml
+name: Commit lint
+on:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
+jobs:
+  commitlint:
+    uses: lumina-w/agents/.github/workflows/shared-commitlint.yml@v4
+    with:
+      runner-label: ubuntu-latest
+```
+
+Rules that apply to every workflow:
+
+- **Pin `@v4`,** never `@main` or a branch. `@v4.Y.Z` pins one exact release.
+- **Triggers belong to the caller.** The workflows only declare
+  `workflow_call`.
+- **Permissions:** each job here declares its minimum permissions, and the
+  caller job must grant at least those (a reusable workflow cannot get more
+  than its caller). Exception: `shared-cd-docker-publish.yml` uses the
+  caller's.
+- **Secrets:** pass them one by one under `secrets:`, or `secrets: inherit`
+  (what `dev-agent.yml` and `docs-sync.yml` callers do). Secrets are not
+  available to workflows triggered by Dependabot unless they also exist in the
+  Dependabot secret store.
+- **Check names** show up as `<caller job> / <job name>`. Moving a repo to a
+  shared workflow changes the names, so the required checks of its branch
+  protection must be updated in the same change.
+
+### Runner selection (`runner-label`)
+
+Every `shared-*.yml` accepts `runner-label`:
+
+| Value | Runs on |
+|---|---|
+| empty (default) | `ubuntu-latest` |
+| a label, e.g. `terracore-vps` | the self-hosted runner with that label |
+| a JSON array, e.g. `'["self-hosted", "build", "terracore-front"]'` | a runner that has all those labels |
+
+`dev-agent.yml`, `automerge-dev.yml`, `delete-merged-branches.yml` and
+`docs-sync.yml` have no runner input: they always run on `ubuntu-latest`.
+
+### Secrets by workflow
+
+| Workflow | Secret | Required | Use |
+|---|---|---|---|
+| `dev-agent.yml` | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Claude authentication |
+| | `DOCS_SOURCES_READ_TOKEN` | no | Read-only org token to clone `<project>-docs` as context |
+| | `PROMOTE_TOKEN` | no | Commits the checkpoint and marks the PR ready so PR workflows run again |
+| `automerge-dev.yml` | `PROMOTE_TOKEN` | yes | Arms auto-merge; the resulting push to `dev` triggers the repo's workflows |
+| `delete-merged-branches.yml` | none | | Uses the workflow token (`contents: write`) |
+| `docs-sync.yml` | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Claude authentication |
+| | `DOCS_SOURCES_READ_TOKEN` | yes | Reads the source repos |
+| `shared-commitlint.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Installs `@lumina-w/dev-standards` over `git+ssh`, only with `install-dependencies: true` |
+| `shared-pr-title.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Same |
+| `shared-validate-pr-base.yml` | none | | |
+| `shared-promote-dev-to-stg.yml` | `PROMOTE_TOKEN` | yes | A PR opened with the workflow token would not trigger the required checks |
+| `shared-claude-code-review.yml` | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Claude authentication |
+| `shared-codeql.yml` | none | | |
+| `shared-security-audit-node.yml` | none | | |
+| `shared-security-audit-python.yml` | none | | |
+| `shared-gitleaks.yml` | `GITLEAKS_LICENSE` | no in the schema, needed in practice | The action requires it for organization repos. It must also exist in the Dependabot secret store |
+| `shared-cd-docker-publish.yml` | `BUILD_ARGS` | no | Secret build args, `KEY=value` per line |
+| | `DISPATCH_TOKEN` | no (yes when dispatching to another repo) | Token for the `repository_dispatch` |
+
+`CLAUDE_CODE_OAUTH_TOKEN`, `DOCS_SOURCES_READ_TOKEN` and `PROMOTE_TOKEN` are
+organization secrets. `DOCS_SOURCES_READ_TOKEN` is a fine-grained PAT with
+Contents read-only on the code repos, `agents` and the three `*-docs` repos.
+
 <!-- dev-agent:start -->
 ## Dev agent (`dev-agent.yml`)
 
-El dev agent de Lúmina W vive **una sola vez** en este repo. Cada repo de código tiene solo un `claude.yml` corto que lo llama con un tag fijo (`@v4`) y le pasa lo que es propio del repo. No hay copias de la lógica en los repos.
+Summary here; the full reference (modes, trigger rules, the nine layers,
+guardrails, checkpoint, labels) is in [`AGENTS.md`](AGENTS.md).
 
-### Qué hace y qué no
-
-| Hace | No hace |
-|---|---|
-| Implementa un issue y abre un PR contra `dev` | Mergear PRs |
-| Itera sobre su PR cuando alguien comenta `@claude` | Pushear a `dev`, `stg` o `main`, ni force push |
-| Corrige su PR cuando el CI falla (máximo 2 rondas) | Promover `dev -> stg -> main` |
-| Actualiza el checkpoint del repo en el mismo PR | Leer `.env`, instalar dependencias por su cuenta, levantar servidores |
-
-Su trabajo termina en el PR. El resto del flujo es de los workflows del repo:
+The agent works from a labeled issue to a PR against `dev`, and stops there.
+The rest of the flow belongs to the repo's workflows:
 
 ```
-issue + label ──> dev agent ──> PR a dev ──> CI ──(verde)──> automerge-dev ──> merge squash a dev
-                                   ^           │                                    │
-                                   │        (rojo)                                  v
-                                   └── modo fix (máx. 2) <─┘         delete-merged-branches (cada 12 h)
-                                                                                    │
-                                              promote-dev-to-stg (10:00 UTC) ──> stg ──(persona)──> main
+issue + label --> dev agent --> PR into dev --> CI --(green)--> automerge-dev --> squash merge into dev
+                                   ^             |                                       |
+                                   |           (red)                                     v
+                                   +-- fix mode (max 2) <--+          delete-merged-branches (every 12 h)
+                                                                                         |
+                                            promote-dev-to-stg (10:00 UTC) --> stg --(person)--> main
 ```
 
-### Cómo se dispara
-
-| Evento | Modo | Modelo por defecto | Turnos |
+| Event | Mode | Default model | Turns |
 |---|---|---|---|
-| Label `dev-ft-ready` en un issue | implement | `opus` | 80 |
-| Label `dev-ft-small` en un issue (tareas pequeñas) | implement | `sonnet` | 40 |
-| Comentario con `@claude` en un PR | iterate | `sonnet` | 40 |
-| El workflow `CI` falla en un PR con label `dev-agent` | fix | `opus` | 80 |
+| Label `dev-ft-ready` on an issue | implement | `opus` | 80 |
+| Label `dev-ft-small` on an issue | implement | `sonnet` | 40 |
+| Comment containing `@claude` on a PR | iterate | `sonnet` | 40 |
+| The `CI` workflow fails on a PR labeled `dev-agent` | fix | `opus` | 80 |
 
-Reglas del disparo:
-
-- Solo cuenta si quien pone el label o comenta tiene permiso `write`, `maintain` o `admin` en el repo.
-- Los eventos de bots se ignoran (evita bucles).
-- Una sola ejecución a la vez por issue o PR.
-- Modo fix: solo en PRs que abrió el agente (label `dev-agent`), marca cada ronda con `agent-fix-1`, `agent-fix-2`; al llegar al límite comenta en el PR y se detiene. Para seguir, una persona comenta `@claude` con instrucciones.
-- Modo fix no existe en repos sin workflow `CI` (hoy `luminaw-page`).
-
-### Capas
-
-| # | Capa | Qué hace |
-|---|---|---|
-| 1 | Disparo | Verifica permisos, ignora bots, resuelve el modo y limita las rondas de fix |
-| 2 | Stack | Configura Python, npm o pnpm con las versiones del repo e instala dependencias antes de que el agente empiece |
-| 3 | Entorno | Exporta variables de configuración locales del repo (nunca secrets) |
-| 4 | Contexto | Lee `CLAUDE.md`, `AGENTS.md`, los docs extra del repo, sus skills en `.claude/skills/` y, en solo lectura, el repo de docs del proyecto (`<proyecto>-docs`) |
-| 5 | Comandos | Solo puede correr los comandos de "tarea terminada" del `CLAUDE.md` del repo más unos pocos extra (formatear, un test puntual). Primero el más acotado; la lista completa una vez antes de cada push |
-| 6 | Bloqueos | Deniega merge, force push, push a `dev`/`stg`/`main`, `reset --hard` y lectura de `.env` |
-| 7 | Retroalimentación | Espera los checks del PR; si el CI falla después, el modo fix lo retoma |
-| 8 | Checkpoint | El agente escribe el checkpoint completo en un archivo temporal y el workflow lo commitea como `.claude/CHECKPOINT.md` en la rama del PR (`docs(docs): update checkpoint after #<n>`, push con `PROMOTE_TOKEN` para que los checks vuelvan a correr). Claude no puede escribir en `.claude/`: es ruta protegida para sus herramientas. Si el repo aún lo tiene en la raíz, lo mueve con `git mv`. Es el mismo archivo que leen el hook `SessionStart`, el comando `/checkpoint` y el sync de docs |
-| 9 | Texto del PR y ready | Reemplaza los guiones largos del título y el cuerpo del PR por ", ". El agente abre el PR como draft y el workflow lo marca listo al final (`gh pr ready` con `PROMOTE_TOKEN`), después del checkpoint: `automerge-dev` ignora los drafts y arma el auto-merge con el evento `ready_for_review`, así que no puede mergear antes de que llegue el checkpoint. Si el agente falla, el PR queda en draft |
-
-La protección de ramas de GitHub sigue siendo la barrera real contra pushes a ramas protegidas; los bloqueos del agente son una segunda capa.
-
-### Caller mínimo (`.github/workflows/claude.yml` en cada repo)
+### Minimal caller (`.github/workflows/claude.yml`)
 
 ```yaml
 name: Claude Code
@@ -94,309 +220,328 @@ jobs:
         npm run build
 ```
 
+A repo without a workflow named `CI` (today luminaw-page) drops the
+`workflow_run` trigger and has no fix mode.
+
 ### Inputs
 
-| Input | Obligatorio | Default | Uso |
+| Input | Required | Default | Use |
 |---|---|---|---|
-| `toolchain` | sí | | `python`, `npm`, `pnpm` o `none` |
-| `python_version` | | | Versión de Python del repo |
-| `python_cache_path` | | | Archivo de requirements para la caché de pip |
-| `node_version` / `node_version_file` | | | Versión de Node, o archivo como `.nvmrc` |
-| `install_command` | | | Instala dependencias antes del agente (`npm ci`, `pnpm install --frozen-lockfile`, `pip install -r ...`) |
-| `env_vars` | | | `CLAVE=valor` por línea para checks locales. Nunca secrets |
-| `verify_commands` | sí | | Comandos de "tarea terminada" del `CLAUDE.md`, uno por línea. Son los únicos checks permitidos |
-| `extra_allowed_tools` | | | Reglas extra de Claude Code, una por línea (`Bash(npm run format)`) |
-| `context_files` | | | Docs del repo que debe leer además de `CLAUDE.md` y `AGENTS.md` |
-| `docs_repo` | | | Repo de docs del proyecto (`terracore-docs`, `okroot-docs`, `luminaw-docs`) |
-| `checkpoint_file` | | `.claude/CHECKPOINT.md` | Checkpoint que actualiza en cada PR (estándar de la org: dentro de `.claude/`) |
-| `base_branch` | | `dev` | Rama de la que parte y a la que abre el PR |
-| `model` / `small_model` | | `opus` / `sonnet` | Modelo normal y el de `dev-ft-small` e iterate |
-| `max_turns` / `small_max_turns` | | `80` / `40` | Turnos por modo |
-| `max_fix_rounds` | | `2` | Rondas máximas del modo fix |
-| `timeout_minutes` | | `30` | Límite del job |
+| `toolchain` | yes | | `python`, `npm`, `pnpm` or `none` |
+| `python_version` | | | Python version of the repo |
+| `python_cache_path` | | | Requirements file used as the pip cache key |
+| `node_version` / `node_version_file` | | | Node version, or a file such as `.nvmrc` (used when `node_version` is empty) |
+| `install_command` | | | Installs dependencies before the agent starts (`npm ci`, `pnpm install --frozen-lockfile`, `pip install -r ...`) |
+| `env_vars` | | | `KEY=value` per line for local checks. Never secrets |
+| `verify_commands` | yes | | The repo's done-criteria commands from its `CLAUDE.md`, one per line. The only checks the agent may run |
+| `extra_allowed_tools` | | | Extra Claude Code permission rules, one per line (`Bash(npm run format)`) |
+| `context_files` | | | Repo docs to read besides `CLAUDE.md` and `AGENTS.md` |
+| `docs_repo` | | | The project's docs repo (`terracore-docs`, `okroot-docs`, `luminaw-docs`), read-only context |
+| `checkpoint_file` | | `.claude/CHECKPOINT.md` | Checkpoint the workflow commits to each PR |
+| `base_branch` | | `dev` | Branch the agent starts from and opens PRs against |
+| `model` / `small_model` | | `opus` / `sonnet` | Model for full runs, and for `dev-ft-small` and iterate |
+| `max_turns` / `small_max_turns` | | `80` / `40` | Turn limit per size |
+| `max_fix_rounds` | | `2` | Maximum fix rounds per PR |
+| `timeout_minutes` | | `30` | Job time limit |
 
-### Secrets (nivel organización, `secrets: inherit`)
+### Callers today
 
-| Secret | Obligatorio | Visible para | Uso |
+| Repo | Toolchain | Verification (`verify_commands`) | Docs repo |
 |---|---|---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` | sí | Todos los repos de código | Autenticación de Claude |
-| `DOCS_SOURCES_READ_TOKEN` | no | Repos de código y repos `*-docs` | Token de solo lectura de la organización (fine-grained PAT, Contents: Read-only) sobre los repos de código, `agents` y los 3 `*-docs`. El sync lo usa para leer el código; el agente, para leer `<proyecto>-docs`. Sin él, el agente trabaja sin contexto de producto |
-| `PROMOTE_TOKEN` | para auto-merge | Repos con `automerge-dev` | Arma el auto-merge; el push a `dev` resultante dispara los workflows del repo. El dev agent lo usa para commitear el checkpoint en la rama del PR; sin él, el checkpoint no se commitea |
-
-### Repos que lo usan
-
-| Repo | Stack | Verificación | Docs |
-|---|---|---|---|
-| terracore-back | Python 3.14 | ruff, black, pytest, check, makemigrations --check | terracore-docs |
-| terracore-front | npm, Node 20 | format:check, lint, type-check, test, build | terracore-docs |
-| terracore-page | pnpm, `.nvmrc` | format:check, lint, typecheck, test, build (e2e si toca markup) | terracore-docs |
-| okroot-back | Python 3.12 | lint, ruff format --check, test, makemigrations --check | okroot-docs |
+| terracore-back | Python 3.14 | ruff, black, `make test`, `make check`, `makemigrations --check` | terracore-docs |
+| terracore-front | npm, Node 20.x | format:check, lint, type-check, test, build | terracore-docs |
+| terracore-page | pnpm, `.nvmrc` | format:check, lint, typecheck, test, build | terracore-docs |
+| okroot-back | Python 3.12 | `make lint`, `ruff format --check`, `make test`, `makemigrations --check` | okroot-docs |
 | okroot-front | pnpm, Node 20 | typecheck, lint, test, build | okroot-docs |
-| okroot-page | npm, Node 22 | lint (astro check), build | okroot-docs |
+| okroot-page | npm, Node 22 | lint, build | okroot-docs |
 | blog-w | npm, Node 20 | lint, build | luminaw-docs |
 | luminaw-page | npm, `.nvmrc` | format:check, build | luminaw-docs |
 
-### Otros workflows compartidos de este repo
+### Trying it
 
-| Workflow | Qué hace |
-|---|---|
-| `automerge-dev.yml` | Arma auto-merge squash en PRs no-draft a `dev` (excluye forks y Dependabot). Requiere `dev` protegida con checks requeridos |
-| `delete-merged-branches.yml` | Borra ramas de PRs ya mergeados a `dev` (el caller lo agenda cada 12 h) |
-| `docs-sync.yml` | Sincroniza cada día `<proyecto>-docs` desde la rama `dev` de los repos del proyecto |
-
-### Versionado
-
-Cada cambio mergeado en `agents` lleva un tag inmutable `v4.Y.Z` y mueve el tag mayor `v4` a ese commit (mismo esquema que las actions oficiales de GitHub).
-
-| Tipo de cambio | Ejemplos | Qué se hace | Callers |
-|---|---|---|---|
-| Compatible | Arreglo, quitar un paso, input o secret opcional nuevo | Tag `v4.Y.Z` y mover `v4` | No cambian |
-| Rompe callers | Input o secret requerido nuevo, renombrar o quitar un input | Tag mayor nuevo (`v5`, `v5.0.0`) | PR en cada caller para subir a `@v5` |
-
-Rollback: mover `v4` al `v4.Y.Z` anterior. Los callers apuntan siempre al tag mayor, nunca a `main`.
-
-### Probarlo
-
-1. Crea un issue pequeño en un repo migrado y ponle `dev-ft-small`.
-2. Revisa la ejecución en Actions del repo (job `claude / agent`).
-3. El PR debe llegar con label `dev-agent`, checkpoint actualizado y solo los checks marcados que corrió.
+1. Open a small issue in a repo that calls it and add the `dev-ft-small` label.
+2. Follow the run in the repo's Actions tab (job `claude / agent`).
+3. The PR must arrive with the `dev-agent` label, the updated checkpoint and
+   only the checks it actually ran marked as done.
 <!-- dev-agent:end -->
 
+## Other workflows
+
+### `automerge-dev.yml`
+
+Arms squash auto-merge on PRs into `dev`. Skips drafts, PRs from forks and
+PRs opened by `dependabot[bot]` (those wait for a person). It only arms the
+auto-merge: branch protection holds the merge until the required checks pass,
+so `dev` must be protected with required checks. Uses `PROMOTE_TOKEN`, not the
+workflow token, so the push to `dev` triggers the repo's workflows. The dev
+agent's PRs are drafts until the workflow marks them ready, so the caller must
+also trigger on `ready_for_review`.
+
+### `delete-merged-branches.yml`
+
+Deletes remote branches whose PR was merged into `base_branch` (`dev` by
+default), only when the branch tip is still the PR head (a reused branch name
+with new commits is kept). Never deletes `dev`, `stg`, `main`, the default
+branch, protected branches or branches with an open PR. Inputs: `dry_run`
+(`false`), `base_branch` (`dev`). Callers schedule it every 12 hours because
+"Automatically delete head branches" is not reliable with auto-merge.
+
 <!-- docs-sync:start -->
-## Docs sync (`docs-sync.yml`)
+### `docs-sync.yml`
 
-Mantiene al día los repos `lumina-w/<proyecto>-docs` desde la rama `dev` de los repos de cada proyecto. Cada repo de docs tiene un caller corto (`docs-daily-sync.yml`, escalonado: terracore 06:00, okroot 06:20, luminaw 06:40 COT) y su `docs-sync.config.yml` (repos fuente, docs gestionados y protegidos, día de auditoría completa).
+Keeps each `lumina-w/<project>-docs` repo current from the `dev` branch of the
+project's source repos. Each docs repo has a thin caller
+(`docs-daily-sync.yml`) and a `docs-sync.config.yml` that lists the source
+repos, the managed and protected docs and the weekday of the full audit.
+Today the three callers run at the same time, `0 11 * * *` (06:00 in Bogotá),
+and also accept `workflow_dispatch` with `force`.
 
-| Caso | Qué pasa | Modelo |
+| Case | What happens | Model |
 |---|---|---|
-| Sin commits nuevos | No corre nada | |
-| Solo dependencias (Dependabot, lockfiles) | Changelog y estado por script | |
-| Commits de código | Script: `changelog` (desde `git log`) y `checkpoint` (desde `.claude/CHECKPOINT.md`). Claude recibe `_changes.md` con el diff y actualiza solo los docs afectados | `sonnet`, 40 turnos |
-| Auditoría completa: `full_audit_weekday` (domingo por defecto), primer sync de un repo o `force=true` | Claude revisa todos los docs gestionados | `opus`, 150 turnos |
+| No new commits | Nothing runs | |
+| Dependency bumps only (Dependabot, lockfiles) | Changelog and status updated by script | |
+| Code commits | Script builds `changelog` (from `git log`) and `checkpoint` (from each repo's `.claude/CHECKPOINT.md`). Claude gets `_changes.md` with the diff and updates only the affected docs | `sonnet`, 40 turns |
+| Full audit: `full_audit_weekday` (Sunday in all three configs), first sync of a repo, or `force: true` | Claude reviews every managed doc | `opus`, 150 turns |
 
-- Los alias `opus` y `sonnet` resuelven al modelo más reciente que permita `CLAUDE_CODE_OAUTH_TOKEN` (hoy `opus` = `claude-opus-5`).
-- Inputs opcionales: `model` y `max_turns` para forzar valores en cualquier modo.
-- Guardas: solo `.md` de la raíz del repo de docs; Claude no puede tocar `changelog`, `checkpoint` ni docs protegidos; un archivo por tipo.
-- Publicación: PR con auto-merge, o push directo a `main` del repo de docs si la empresa no deja a Actions crear PRs.
-- Sin espejo a Drive (retirado el 2026-09-23): los docs viven solo en GitHub y en local.
+- The `opus` and `sonnet` aliases resolve to the latest model that
+  `CLAUDE_CODE_OAUTH_TOKEN` can use.
+- Optional inputs `model` and `max_turns` override both modes. `auto_merge`
+  (`true`) and `config_path` (`docs-sync.config.yml`) are also inputs.
+- Guards: only root `.md` files of the docs repo; Claude cannot touch
+  `changelog`, `checkpoint` or protected docs; one current file per doc type.
+- Publishing: a PR with auto-merge, or a direct push to the docs repo's
+  `main` if the organization does not let Actions open PRs.
+- No Google Drive mirror (removed on 2026-09-23): the docs live only in
+  GitHub.
+- luminaw-docs also reads this repo (`agents`, branch `main`) as a source.
 <!-- docs-sync:end -->
 
 <!-- shared-workflows:start -->
-## Workflows compartidos de CI/CD (`shared-*.yml`)
+## Shared CI/CD workflows (`shared-*.yml`)
 
-Lógica de CI/CD que hoy está copiada en cada repo de producto. Cada repo la llama con un caller corto y el tag mayor (`@v4`), igual que el dev agent. Los repos de producto todavía no los usan: siguen con sus copias.
+Each one replaces logic that used to be copied in every product repo. The
+"Origin" line names the per-repo file it came from.
 
-Reglas comunes:
-
-- Todos aceptan `runner-label`. Vacío corre en `ubuntu-latest`; con una etiqueta (`terracore-vps`), en el runner que la tenga; con un array JSON (`'["self-hosted", "build", "terracore-front"]'`), en el runner que tenga todas.
-- Versiones fijas de acciones: `actions/checkout@v7`, `actions/setup-node@v7`, `actions/setup-python@v7`, `pnpm/action-setup@v6.1.0`, `docker/build-push-action@v7`, `docker/login-action@v4`, `docker/metadata-action@v6`, `github/codeql-action@v4`.
-- Los triggers (`on:`) los pone el caller; el workflow compartido solo declara `workflow_call`.
-- Cada job declara sus permisos mínimos y el job del caller debe conceder al menos esos (un reusable no puede pedir más que su caller). Excepción: `shared-cd-docker-publish.yml` usa los del caller.
-- En GitHub el check queda como `<job del caller> / <nombre del job>`. Al migrar un repo hay que actualizar los checks requeridos de la protección de ramas.
-
-### Caller mínimo
-
-```yaml
-name: Commit lint
-on:
-  push:
-    branches: ['**']
-permissions:
-  contents: read
-jobs:
-  commitlint:
-    uses: lumina-w/agents/.github/workflows/shared-commitlint.yml@v4
-    with:
-      runner-label: ubuntu-latest
-```
+Third-party actions are pinned: `actions/checkout@v7`,
+`actions/setup-node@v7`, `actions/setup-python@v7`, `pnpm/action-setup@v6.1.0`,
+`docker/build-push-action@v7`, `docker/login-action@v4`,
+`docker/metadata-action@v6`, `github/codeql-action@v4`,
+`webfactory/ssh-agent@v0.10.0`, `wagoid/commitlint-github-action@v6`,
+`gitleaks/gitleaks-action@v3`, `anthropics/claude-code-action@v1`,
+`peter-evans/repository-dispatch@v4` and `aquasecurity/trivy-action` by
+commit SHA (v0.36.0).
 
 ### `shared-commitlint.yml`
 
-Origen: `commit-lint.yml`. Lint de Conventional Commits sobre los commits que trae cada push.
+Origin: `commit-lint.yml`. Lints the commits each push introduces (the
+action compares the push's `before` and `after`; a new branch lints the
+commits in the push payload) against the caller repo's `.commitlintrc.json`.
 
-- Trigger del caller: `push: branches: ['**']`
-- Permisos: `contents: read`
+- Caller trigger: `push: branches: ['**']`
+- Permissions: `contents: read`
 - Check: `Conventional Commits`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `config-file` | string | `.commitlintrc.json` | Config de commitlint del repo |
-| `install-dependencies` | boolean | `false` | `true` corre `npm ci` antes del lint, para un `extends` que apunta a un paquete del `package.json` del repo (`@lumina-w/dev-standards`) |
-| `node-version` | string | `'22'` | Node para `npm ci` cuando `install-dependencies` es `true` |
+| `runner-label` | string | `''` | Runner label |
+| `config-file` | string | `.commitlintrc.json` | commitlint config of the repo. The action falls back to config-conventional silently if the file is missing |
+| `install-dependencies` | boolean | `false` | `true` runs `npm ci` first, for an `extends` that names a package from the repo's `package.json` (`@lumina-w/dev-standards`) |
+| `node-version` | string | `'22'` | Node for `npm ci` when `install-dependencies` is `true` |
 
-| Secret | Obligatorio | Uso |
+| Secret | Required | Use |
 |---|---|---|
-| `DEV_STANDARDS_DEPLOY_KEY` | no | Deploy key de solo lectura para instalar `@lumina-w/dev-standards` por `git+ssh`. Solo se usa con `install-dependencies: true` |
+| `DEV_STANDARDS_DEPLOY_KEY` | no | Read-only deploy key to install `@lumina-w/dev-standards` over `git+ssh`. Only used with `install-dependencies: true` |
 
 ### `shared-pr-title.yml`
 
-Origen: `pr-title.yml`. Valida el título del PR (el commit que queda tras el squash) con el mismo `.commitlintrc.json`.
+Origin: `pr-title.yml`. PRs are squash-merged, so the title becomes the commit
+on the base branch; it is linted with the same `.commitlintrc.json`. The title
+is passed through the environment, never interpolated into the script.
 
-- Trigger del caller: `pull_request: types: [opened, edited, synchronize, reopened]`
-- Permisos: `contents: read`
+- Caller trigger: `pull_request: types: [opened, edited, synchronize, reopened]`
+- Permissions: `contents: read`
 - Check: `PR title (Conventional Commits)`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `config-file` | string | `.commitlintrc.json` | Config de commitlint del repo |
-| `node-version` | string | `'22'` | Node para instalar commitlint |
-| `commitlint-version` | string | `'21'` | Versión mayor de `@commitlint/cli` y `@commitlint/config-conventional` |
-| `install-dependencies` | boolean | `false` | `true` corre `npm ci` y valida desde la raíz del repo, para un `extends` que apunta a un paquete del `package.json` del repo. Solo agrega `@commitlint/cli`, sin tocar `package.json` |
+| `runner-label` | string | `''` | Runner label |
+| `config-file` | string | `.commitlintrc.json` | commitlint config of the repo |
+| `node-version` | string | `'22'` | Node used to install commitlint |
+| `commitlint-version` | string | `'21'` | Major version of `@commitlint/cli` and `@commitlint/config-conventional` |
+| `install-dependencies` | boolean | `false` | `true` runs `npm ci` and lints from the repo root, for an `extends` that names a package of the repo. Only adds `@commitlint/cli`, without touching `package.json` |
 
-| Secret | Obligatorio | Uso |
+| Secret | Required | Use |
 |---|---|---|
-| `DEV_STANDARDS_DEPLOY_KEY` | no | Igual que en `shared-commitlint.yml` |
+| `DEV_STANDARDS_DEPLOY_KEY` | no | Same as in `shared-commitlint.yml` |
 
 ### `shared-validate-pr-base.yml`
 
-Origen: `validate-pr-base.yml`. Exige el flujo `dev -> stg -> main` (o una rama de resolución de conflictos con el mismo contenido que la rama esperada).
+Origin: `validate-pr-base.yml`. A PR into `stg` must come from `dev`, a PR
+into `main` must come from `stg`, and no other base is allowed. The exception
+is a conflict-resolution branch whose tree matches the expected head exactly.
 
-- Trigger del caller: `pull_request: types: [opened, edited, synchronize, reopened]`
-- Permisos: `contents: read`
+- Caller trigger: `pull_request: types: [opened, edited, synchronize, reopened]`
+- Permissions: `contents: read`
 - Check: `PR base must follow dev -> stg -> main`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
+| `runner-label` | string | `''` | Runner label |
 
 ### `shared-promote-dev-to-stg.yml`
 
-Origen: `promote-dev-to-stg.yml`. Abre o reutiliza el PR de promoción, espera los checks requeridos y lo mergea. Una sola promoción a la vez por par de ramas.
+Origin: `promote-dev-to-stg.yml`. Opens or reuses the promotion PR, waits for
+its required checks and merges it. One promotion at a time per branch pair.
 
-- Trigger del caller: `schedule` (hoy `0 10 * * *`) y `workflow_dispatch`
-- Permisos: `contents: read`, `pull-requests: write`, `checks: read`, `statuses: read`, `actions: read`
-- Secrets: `PROMOTE_TOKEN` (obligatorio). Con `GITHUB_TOKEN` el PR no dispararía los checks
+- Caller trigger: `schedule` (today `0 10 * * *`) and `workflow_dispatch`
+- Permissions: `contents: read`, `pull-requests: write`, `checks: read`, `statuses: read`, `actions: read`
+- Secrets: `PROMOTE_TOKEN` (required)
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `source-branch` | string | `dev` | Rama que se promueve |
-| `target-branch` | string | `stg` | Rama destino |
-| `merge-method` | string | `squash` | `squash`, `merge` o `rebase` |
-| `timeout-minutes` | number | `60` | Límite del job |
+| `runner-label` | string | `''` | Runner label |
+| `source-branch` | string | `dev` | Branch that is promoted |
+| `target-branch` | string | `stg` | Target branch |
+| `merge-method` | string | `squash` | `squash`, `merge` or `rebase` |
+| `timeout-minutes` | number | `60` | Job time limit |
 
 ### `shared-claude-code-review.yml`
 
-Origen: `claude-code-review.yml`. Review de Claude con comentarios inline en el PR. Un push nuevo al mismo ref cancela la review en curso.
+Origin: `claude-code-review.yml` (okroot-*, blog-w, luminaw-page). Runs the
+`code-review` plugin, which posts inline comments on the PR. A newer push to
+the same ref cancels the review in progress.
 
-- Trigger del caller: `pull_request: types: [opened, synchronize, ready_for_review, reopened]`
-- Permisos: `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write`
-- Secrets: `CLAUDE_CODE_OAUTH_TOKEN` (obligatorio)
+- Caller trigger: `pull_request: types: [opened, synchronize, ready_for_review, reopened]`
+- Permissions: `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write`
+- Secrets: `CLAUDE_CODE_OAUTH_TOKEN` (required)
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `model` | string | `''` | Se pasa como `--model` (`claude-sonnet-5`, `sonnet`). Vacío usa el modelo por defecto de la action |
-| `timeout-minutes` | number | `15` | Límite del job |
+| `runner-label` | string | `''` | Runner label |
+| `model` | string | `''` | Passed as `--model` (`claude-sonnet-5`, `sonnet`). Empty uses the action's default |
+| `timeout-minutes` | number | `15` | Job time limit |
 
 ### `shared-codeql.yml`
 
-Origen: `codeql.yml`. Análisis CodeQL de un lenguaje. Por defecto es informativo: si el análisis o la subida del SARIF fallan (por ejemplo, Code Security deshabilitado en un repo privado), el check sigue en verde.
+Origin: `codeql.yml` (terracore-*). CodeQL for one language. Informational by
+default: if the analysis or the SARIF upload fail (for example, Code Security
+disabled on a private repo), the check stays green.
 
-- Trigger del caller: `push`/`pull_request` a `main`, `stg`, `dev` y `schedule` (hoy lunes 06:00 UTC), o solo `workflow_dispatch` en repos sin GHAS
-- Permisos: `security-events: write`, `actions: read`, `contents: read`
+- Caller trigger: `push`/`pull_request` to `main`, `stg`, `dev` and `schedule`, or only `workflow_dispatch` in repos without GHAS (terracore-page)
+- Permissions: `security-events: write`, `actions: read`, `contents: read`
 - Check: `analyze`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `language` | string | obligatorio | `python`, `javascript-typescript`, ... |
-| `queries` | string | `''` | Suite extra (`security-and-quality`). Vacío usa la suite por defecto |
-| `blocking` | boolean | `false` | `true` hace fallar el check si falla el análisis o la subida |
-| `timeout-minutes` | number | `30` | Límite del job |
+| `runner-label` | string | `''` | Runner label |
+| `language` | string | required | `python`, `javascript-typescript`, ... |
+| `queries` | string | `''` | Extra suite (`security-and-quality`). Empty uses the default suite |
+| `blocking` | boolean | `false` | `true` fails the check when the analysis or the upload fails |
+| `timeout-minutes` | number | `30` | Job time limit |
 
 ### `shared-security-audit-node.yml`
 
-Origen: `security.yml` de terracore-front (npm) y el job de auditoría del `ci.yml` de okroot-page (npm) y terracore-page (pnpm). Instala dependencias y corre `npm audit` o `pnpm audit`.
+Origin: `security.yml` of terracore-front (npm) and the audit job of the
+`ci.yml` of okroot-page (npm) and terracore-page (pnpm). Installs
+dependencies and runs `npm audit` or `pnpm audit`.
 
-- Trigger del caller: el que use el repo (`push`/`pull_request`/`schedule`)
-- Permisos: `contents: read`
-- Check: `npm-audit` o `pnpm-audit`
+- Caller trigger: whatever the repo uses (`push`/`pull_request`/`schedule`)
+- Permissions: `contents: read`
+- Check: `npm-audit` or `pnpm-audit`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `package-manager` | string | obligatorio | `npm` o `pnpm` |
-| `node-version` | string | `''` | Versión de Node (`20.x`, `22`) |
-| `node-version-file` | string | `''` | Archivo de versión (`.nvmrc`) |
-| `pnpm-version` | string | `''` | Versión de pnpm. Vacío lee `packageManager` de `package.json` |
-| `working-directory` | string | `'.'` | Carpeta con `package.json` y lockfile |
-| `install-command` | string | `''` | Vacío usa `npm ci` o `pnpm install --frozen-lockfile` |
-| `audit-level` | string | `high` | `low`, `moderate`, `high` o `critical` |
-| `blocking` | boolean | `false` | `true` hace fallar el check con hallazgos en o sobre `audit-level` |
-| `timeout-minutes` | number | `15` | Límite del job |
+| `runner-label` | string | `''` | Runner label |
+| `package-manager` | string | required | `npm` or `pnpm` |
+| `node-version` | string | `''` | Node version (`20.x`, `22`) |
+| `node-version-file` | string | `''` | Version file (`.nvmrc`) |
+| `pnpm-version` | string | `''` | pnpm version. Empty reads `packageManager` from `package.json` |
+| `working-directory` | string | `'.'` | Folder with `package.json` and the lockfile |
+| `install-command` | string | `''` | Empty uses `npm ci` or `pnpm install --frozen-lockfile` |
+| `audit-level` | string | `high` | `low`, `moderate`, `high` or `critical` |
+| `blocking` | boolean | `false` | `true` fails the check on findings at or above `audit-level` |
+| `timeout-minutes` | number | `15` | Job time limit |
 
 ### `shared-security-audit-python.yml`
 
-Origen: `security.yml` de terracore-back. Dos jobs: `pip-audit` (dependencias, bloqueante por defecto) y `bandit` (SAST, informativo por defecto).
+Origin: `security.yml` of terracore-back. Two jobs: `pip-audit` (dependencies,
+blocking by default) and `bandit` (SAST, informational by default).
 
-- Trigger del caller: el que use el repo (`push`/`pull_request`/`schedule`)
-- Permisos: `contents: read`
-- Checks: `pip-audit` y `bandit`
+- Caller trigger: whatever the repo uses (`push`/`pull_request`/`schedule`)
+- Permissions: `contents: read`
+- Checks: `pip-audit` and `bandit`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `python-version` | string | `''` | Versión de Python (`3.14`, `3.12`) |
-| `python-version-file` | string | `''` | Archivo de versión (`.python-version`) |
-| `working-directory` | string | `'.'` | Carpeta donde corre pip-audit |
-| `requirements-file` | string | `requirements.txt` | Requirements que audita pip-audit, relativo a `working-directory` |
-| `pip-audit-version` | string | `2.9.0` | Versión de pip-audit |
-| `pip-audit-blocking` | boolean | `true` | `false` deja pip-audit solo informativo |
-| `bandit-version` | string | `1.9.4` | Versión de bandit |
-| `bandit-path` | string | `'.'` | Ruta que escanea bandit, relativa a la raíz del repo |
-| `bandit-exclude` | string | `*/tests/*,*/migrations/*,*/.venv/*,*/venv/*` | Rutas excluidas de bandit |
-| `bandit-blocking` | boolean | `false` | `true` hace fallar el check con hallazgos de bandit |
-| `timeout-minutes` | number | `15` | Límite de cada job |
+| `runner-label` | string | `''` | Runner label |
+| `python-version` | string | `''` | Python version (`3.14`, `3.12`) |
+| `python-version-file` | string | `''` | Version file (`.python-version`) |
+| `working-directory` | string | `'.'` | Folder where pip-audit runs |
+| `requirements-file` | string | `requirements.txt` | Requirements audited by pip-audit, relative to `working-directory` |
+| `pip-audit-version` | string | `2.9.0` | pip-audit version |
+| `pip-audit-blocking` | boolean | `true` | `false` makes pip-audit informational |
+| `bandit-version` | string | `1.9.4` | bandit version |
+| `bandit-path` | string | `'.'` | Path bandit scans, relative to the repo root |
+| `bandit-exclude` | string | `*/tests/*,*/migrations/*,*/.venv/*,*/venv/*` | Paths excluded from bandit |
+| `bandit-blocking` | boolean | `false` | `true` fails the check on bandit findings |
+| `timeout-minutes` | number | `15` | Time limit of each job |
 
 ### `shared-gitleaks.yml`
 
-Origen: job `gitleaks` del `ci.yml` de terracore-back y terracore-front. Escaneo de secretos del diff del PR o de los commits del push.
+Origin: the `gitleaks` job of the `ci.yml` of terracore-back and
+terracore-front. Scans the PR diff or the pushed commits for secrets.
 
-- Trigger del caller: el del CI del repo (`pull_request`)
-- Permisos: `contents: read`, `pull-requests: read`
-- Secrets: `GITLEAKS_LICENSE`. La action la exige en repos de organización; tiene que existir también en el store de secrets de Dependabot
+- Caller trigger: the repo's CI (`pull_request`)
+- Permissions: `contents: read`, `pull-requests: read`
+- Secrets: `GITLEAKS_LICENSE`. The action requires it for organization repos; it has to exist in the Dependabot secret store too
 - Check: `Secret scan (gitleaks)`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `timeout-minutes` | number | `10` | Límite del job |
+| `runner-label` | string | `''` | Runner label |
+| `timeout-minutes` | number | `10` | Job time limit |
 
 ### `shared-cd-docker-publish.yml`
 
-Origen: job `docker-publish` de `cd-staging.yml`/`cd-production.yml` (terracore-front, okroot-back) y `docker-build-push.yml` (okroot-front). Construye la imagen, la escanea con Trivy (opcional, falla con cualquier CRITICAL que tenga arreglo), la sube a GHCR con el tag `<tag-prefix>-<sha completo>` y, si se pide, envía un `repository_dispatch`. El dispatch solo sale en un `push` real, nunca en `workflow_dispatch`.
+Origin: the `docker-publish` job of `cd-staging.yml`/`cd-production.yml`
+(terracore-front, okroot-back) and `docker-build-push.yml` (okroot-front).
+Builds the image, scans it with Trivy (optional; fails on any fixable
+CRITICAL), pushes it to GHCR with the tag `<tag-prefix>-<full sha>` and, if
+asked, sends a `repository_dispatch`. With the scan on, the pushed image is
+the one that was scanned. The dispatch only fires on a real `push`, never on
+`workflow_dispatch`.
 
-- Trigger del caller: `push` a `stg` o `main` (y `workflow_dispatch` si se quiere republicar sin notificar)
-- Permisos (los concede el caller): `contents: read` y `packages: write`; `contents: write` si hace dispatch al mismo repo sin `DISPATCH_TOKEN`
-- Secrets: `BUILD_ARGS` (opcional, `CLAVE=valor` por línea) y `DISPATCH_TOKEN` (opcional; obligatorio si `dispatch-target-repo` es otro repo). Sin `DISPATCH_TOKEN` usa el token del workflow
-- Payload del dispatch: `{"environment": <tag-prefix>, "image_digest": ..., "image": ..., "sha": ...}`, que cubre los campos que leen hoy terracore-back, okroot-back y okroot-front
-- Outputs: `image` (nombre:tag) y `digest`
+- Caller trigger: `push` to `stg` or `main` (and `workflow_dispatch` to republish without notifying)
+- Permissions (granted by the caller): `contents: read` and `packages: write`; `contents: write` when dispatching to the same repo without `DISPATCH_TOKEN`
+- Secrets: `BUILD_ARGS` (optional, `KEY=value` per line) and `DISPATCH_TOKEN` (optional; required when `dispatch-target-repo` is another repo). Without `DISPATCH_TOKEN` it uses the workflow token
+- Dispatch payload: `{"environment": <tag-prefix>, "image_digest": ..., "image": ..., "sha": ...}`, which covers the fields terracore-back, okroot-back and okroot-front read today
+- Outputs: `image` (name:tag) and `digest`
 
-| Input | Tipo | Default | Uso |
+| Input | Type | Default | Use |
 |---|---|---|---|
-| `runner-label` | string | `''` | Etiqueta del runner |
-| `dockerfile` | string | `''` | Ruta del Dockerfile desde la raíz. Vacío usa `<context>/Dockerfile` |
-| `context` | string | `'.'` | Contexto del build |
-| `image-name` | string | `''` | Imagen completa en GHCR. Vacío usa `ghcr.io/<owner>/<repo>` |
-| `tag-prefix` | string | obligatorio | Prefijo del tag (`stg`, `main`, `prod`); también va como `environment` en el payload |
-| `build-args` | string | `''` | Build args no secretos, `CLAVE=valor` por línea |
-| `environment` | string | `''` | GitHub Environment del job. Vacío no asocia ninguno |
-| `trivy-scan` | boolean | `true` | Escanea la imagen antes de subirla |
-| `dispatch-event` | string | `''` | Tipo de evento del `repository_dispatch`. Vacío no envía nada |
-| `dispatch-target-repo` | string | `''` | `owner/repo` que recibe el dispatch. Vacío usa el repo actual |
-| `timeout-minutes` | number | `15` | Límite del job |
+| `runner-label` | string | `''` | Runner label |
+| `dockerfile` | string | `''` | Dockerfile path from the root. Empty uses `<context>/Dockerfile` |
+| `context` | string | `'.'` | Build context |
+| `image-name` | string | `''` | Full GHCR image name. Empty uses `ghcr.io/<owner>/<repo>` |
+| `tag-prefix` | string | required | Tag prefix (`stg`, `main`, `prod`); also sent as `environment` in the payload |
+| `build-args` | string | `''` | Non-secret build args, `KEY=value` per line |
+| `environment` | string | `''` | GitHub Environment of the job. Empty binds none |
+| `trivy-scan` | boolean | `true` | Scans the image before pushing it |
+| `dispatch-event` | string | `''` | `repository_dispatch` event type. Empty sends nothing |
+| `dispatch-target-repo` | string | `''` | `owner/repo` that receives the dispatch. Empty uses the current repo |
+| `timeout-minutes` | number | `15` | Job time limit |
 
-Secrets de un GitHub Environment: el job del caller no puede tener `environment`, así que no puede pasarlos. Si se usa el input `environment` y ese Environment tiene secrets llamados `BUILD_ARGS` o `DISPATCH_TOKEN`, esos reemplazan a los que pase el caller.
+Environment secrets: the caller job cannot have `environment`, so it cannot
+pass them. If the `environment` input is used and that Environment has
+secrets named `BUILD_ARGS` or `DISPATCH_TOKEN`, those replace the ones the
+caller passes.
 
 ```yaml
 jobs:
   publish:
     uses: lumina-w/agents/.github/workflows/shared-cd-docker-publish.yml@v4
     permissions:
-      # write: dispatch al mismo repo con el token del workflow
+      # write: dispatch to the same repo with the workflow token
       contents: write
       packages: write
     with:
@@ -408,3 +553,44 @@ jobs:
         API_URL=${{ secrets.API_URL }}
 ```
 <!-- shared-workflows:end -->
+
+## Relationship with dev-standards
+
+`@lumina-w/dev-standards` is the source of truth for the commit rules and the
+branch chain; this repo runs checks in CI.
+
+- **Today.** `shared-commitlint.yml` and `shared-pr-title.yml` lint against
+  the caller repo's own `.commitlintrc.json`. With
+  `install-dependencies: true` they first run `npm ci` in the caller repo,
+  loading `DEV_STANDARDS_DEPLOY_KEY` with `webfactory/ssh-agent`, so a config
+  that extends `@lumina-w/dev-standards/commitlint` resolves. The caller
+  still has to carry a `package.json`, a lockfile and the deploy key. Only
+  terracore-back does this; the other seven repos lint against a local copy
+  of the same rules.
+- **Pending design, not implemented.** The two workflows would install
+  dev-standards themselves with the deploy key, so a consumer would need only
+  the one-line `.commitlintrc.json` and the install logic would live here once.
+  No workflow does this yet.
+- `shared-validate-pr-base.yml` is the server-side counterpart of the
+  dev-standards push chain: it checks the PR direction `dev -> stg -> main`.
+
+## Versioning
+
+Callers always point to the major tag (`@v4`), never to `main`. Each merged
+change that alters what callers run gets an immutable `v4.Y.Z` tag and moves
+`v4` to it, the same scheme as GitHub's official actions. Docs-only changes
+ride with the next release.
+
+| Kind of change | Examples | What to do | Callers |
+|---|---|---|---|
+| Compatible | Fix, removing a step, a new optional input or secret | Tag `v4.Y.Z` and move `v4` | No change |
+| Breaking | New required input or secret, renaming or removing an input | New major tag (`v5`, `v5.0.0`) | A PR in each caller to move to `@v5` |
+
+Rollback: move `v4` back to the previous `v4.Y.Z`.
+
+Tags today: `v4.0.0`, `v4.1.0`, `v4.1.1`, `v4.2.0`, `v4.2.1`, `v4.3.0`,
+`v4.4.0` (shared workflows, agents#13), `v4.5.0` (agents#14, current `v4`).
+The older majors `v2` and `v3` still exist; no caller in the organization uses
+them.
+
+The full procedure is in [`CONTRIBUTING.md`](CONTRIBUTING.md).
