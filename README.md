@@ -372,6 +372,19 @@ ancestor, lints the commits no other branch contains) against the caller
 repo's `.commitlintrc.json`. It runs `@commitlint/cli` directly instead of a
 container action, so it also runs on the ephemeral self-hosted runners.
 
+Commits authored by `dependabot[bot]` (git author name) are linted without the
+header length rules the resolved config defines, the same exemption
+`shared-pr-title.yml` gives Dependabot's PR titles. That covers the commits on
+Dependabot's branches and the squash of its PRs, whose author is also
+`dependabot[bot]`. The job writes `.commitlintrc.dependabot-commits.json` next
+to the config, extending it and turning off only those rules; type, scope and
+the rest still apply, so a title like `Bump the ... group` or a `deps-dev`
+scope still fails. A push with no Dependabot commit is linted in one
+commitlint run over the range; a push with one is linted commit by commit,
+each against the config that applies to it. The git author name can be set by
+anyone who pushes, so the exemption is only as strong as the header length
+rule it relaxes: it never skips type, scope or any other rule.
+
 - Caller trigger: `push: branches: ['**']`
 - Permissions: `contents: read`
 - Check: `Conventional Commits`
@@ -401,8 +414,7 @@ Dependabot writes those titles and they often pass 72 characters (okroot-page's
 group bumps reach 78). The job writes `.commitlintrc.dependabot-title.json` next
 to the config, extending it and turning off only those rules, so type, scope and
 the rest still apply. PRs opened by anyone else are linted as is.
-`shared-commitlint.yml` has no such exemption yet: Dependabot's commits are
-still linted with every rule on push.
+`shared-commitlint.yml` gives Dependabot's commits the same exemption.
 
 - Caller trigger: `pull_request: types: [opened, edited, synchronize, reopened]`
 - Permissions: `contents: read`

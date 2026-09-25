@@ -14,6 +14,14 @@
 # names a package from the repo's package.json (@lumina-w/dev-standards).
 # When that package is a private git+ssh dependency, the caller passes
 # DEV_STANDARDS_DEPLOY_KEY.
+#
+# Commits authored by dependabot[bot] are linted without the header length
+# rules (header-max-length and dev-standards' header-max-length-no-pr-suffix),
+# the same exemption shared-pr-title.yml gives Dependabot's PR titles: its
+# commits and the squash of its PRs carry titles Dependabot writes, often past
+# 72 characters. Every other rule still applies to them. A push with no
+# Dependabot commit is linted in one commitlint run, as before; a push with one
+# is linted commit by commit, each against the config that applies to it.
 
 name: Commit lint (reusable)
 
@@ -97,26 +105,74 @@ jobs:
           fi
           echo "from=$from" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
-      - name: Lint the commits with the repo's dependencies
+      - name: Install commitlint with the repo's dependencies
+        id: deps
         if: inputs.install-dependencies && steps.range.outputs.skip != 'true'
-        env:
-          FROM: ${{ steps.range.outputs.from }}
         run: |
+          # commitlint resolves `extends` from the config file's own directory,
+          # the repo root, where npm ci installs the shared config. The CLI is
+          # added on top without touching package.json or the lockfile.
           [ -f "$CONFIG_FILE" ] || { echo "::error::$CONFIG_FILE not found"; exit 1; }
           npm ci --ignore-scripts --no-audit --no-fund --silent
           npm install --no-save --ignore-scripts --no-audit --no-fund --silent \
             "@commitlint/cli@$COMMITLINT_VERSION"
-          npx --no-install commitlint --config "$CONFIG_FILE" ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
-      - name: Lint the commits
+          echo "dir=$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "config=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+      - name: Install commitlint
+        id: scratch
         if: ${{ !inputs.install-dependencies && steps.range.outputs.skip != 'true' }}
-        env:
-          FROM: ${{ steps.range.outputs.from }}
         run: |
+          # commitlint resolves `extends` from the config file's own directory,
+          # so the config is linted from a scratch dir holding the packages.
           [ -f "$CONFIG_FILE" ] || { echo "::error::$CONFIG_FILE not found"; exit 1; }
           dir="$RUNNER_TEMP/commitlint"
           mkdir -p "$dir"
           cp "$CONFIG_FILE" "$dir/"
           (cd "$dir" && npm init -y >/dev/null && npm install --no-audit --no-fund --silent \
             "@commitlint/cli@$COMMITLINT_VERSION" "@commitlint/config-conventional@$COMMITLINT_VERSION")
-          "$dir/node_modules/.bin/commitlint" --cwd "$GITHUB_WORKSPACE" \
-            --config "$dir/$(basename "$CONFIG_FILE")" ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "config=$(basename "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
+      - name: Lint the commits
+        if: steps.range.outputs.skip != 'true'
+        env:
+          FROM: ${{ steps.range.outputs.from }}
+          LINT_DIR: ${{ steps.deps.outputs.dir || steps.scratch.outputs.dir }}
+          LINT_CONFIG: ${{ steps.deps.outputs.config || steps.scratch.outputs.config }}
+        run: |
+          set -euo pipefail
+          commitlint="$LINT_DIR/node_modules/.bin/commitlint"
+          config="$LINT_DIR/$LINT_CONFIG"
+          range="${FROM:+$FROM..}$AFTER"
+          bot="dependabot[bot]"
+          # grep reads the whole list (no -q), so git log never gets SIGPIPE.
+          if ! git log --format='%an' "$range" | grep -x -F "$bot" >/dev/null; then
+            "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$config" \
+              ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
+            exit 0
+          fi
+          # A config next to the repo's one that extends it and turns off only
+          # the header length rules the resolved config defines.
+          relaxed="$(dirname "$config")/.commitlintrc.dependabot-commits.json"
+          "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$config" --print-config json \
+            | BASE="./$(basename "$config")" node -e '
+                let raw = "";
+                process.stdin.on("data", (c) => { raw += c; });
+                process.stdin.on("end", () => {
+                  const rules = {};
+                  for (const name of Object.keys(JSON.parse(raw).rules || {})) {
+                    if (name.startsWith("header-max-length")) rules[name] = [0];
+                  }
+                  process.stdout.write(JSON.stringify({ extends: [process.env.BASE], rules }));
+                });' > "$relaxed"
+          echo "Commits by $bot: header length rules off ($(cat "$relaxed"))."
+          failed=0
+          while IFS=$'\t' read -r sha author; do
+            use="$config"
+            if [ "$author" = "$bot" ]; then use="$relaxed"; fi
+            echo "::group::$sha"
+            echo "Author: $author"
+            git log -1 --format=%B "$sha" \
+              | "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$use" --verbose || failed=1
+            echo "::endgroup::"
+          done < <(git log --reverse --format='%H%x09%an' "$range")
+          exit "$failed"
