@@ -1,0 +1,55 @@
+# Reusable workflow: Lighthouse CI (performance, accessibility, SEO;
+# axe-core under the hood) for pnpm product repos.
+# Origin: lighthouse.yml (terracore-page).
+
+name: Lighthouse (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      node-version-file:
+        description: File with the Node version (.nvmrc, ...)
+        type: string
+        default: '.nvmrc'
+      config-path:
+        description: Lighthouse CI config, relative to the repo root
+        type: string
+        default: './lighthouserc.json'
+      timeout-minutes:
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  lighthouse:
+    name: Lighthouse CI
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6.1.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v12
+        with:
+          configPath: ${{ inputs.config-path }}
+          uploadArtifacts: true
+          temporaryPublicStorage: true

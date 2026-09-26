@@ -40,6 +40,8 @@ the personal Claude Code configuration belongs to `wavival-coding-config`.
 | `shared-ci-django.yml` | Django backend CI: ruff/black lint, pytest against a throwaway PostgreSQL, migration check, Docker build. | New, not yet called by any repo |
 | `shared-gitleaks.yml` | Secret scan of the PR diff or the pushed commits. | In use by 2 repos |
 | `shared-cd-docker-publish.yml` | Builds a Docker image, scans it with Trivy, pushes it to GHCR and optionally sends a `repository_dispatch`. | In use by 2 repos |
+| `shared-ci-astro.yml` | Astro/pnpm CI: format/lint/typecheck/unit tests, build with a dist size warning, Playwright E2E. | New, not yet called by any repo |
+| `shared-lighthouse.yml` | Lighthouse CI (performance, accessibility, SEO) for pnpm projects. | New, not yet called by any repo |
 
 | Action | Purpose | Status |
 |---|---|---|
@@ -177,6 +179,8 @@ only the tools the runner image ships.
 | `shared-gitleaks.yml` | `GITLEAKS_LICENSE` | no in the schema, needed in practice | The action requires it for organization repos. It must also exist in the Dependabot secret store |
 | `shared-cd-docker-publish.yml` | `BUILD_ARGS` | no | Secret build args, `KEY=value` per line |
 | | `DISPATCH_TOKEN` | no (yes when dispatching to another repo) | Token for the `repository_dispatch` |
+| `shared-ci-astro.yml` | none | | |
+| `shared-lighthouse.yml` | none | | |
 
 `CLAUDE_CODE_OAUTH_TOKEN`, `DOCS_SOURCES_READ_TOKEN` and `PROMOTE_TOKEN` are
 organization secrets. `DOCS_SOURCES_READ_TOKEN` is a fine-grained PAT with
@@ -363,8 +367,9 @@ Third-party actions are pinned: `actions/checkout@v7`,
 `docker/metadata-action@v6`, `github/codeql-action@v4`,
 `webfactory/ssh-agent@v0.10.0`,
 `gitleaks/gitleaks-action@v3`, `anthropics/claude-code-action@v1`,
-`peter-evans/repository-dispatch@v4` and `aquasecurity/trivy-action` by
-commit SHA (v0.36.0).
+`peter-evans/repository-dispatch@v4`, `treosh/lighthouse-ci-action@v12`,
+`actions/upload-artifact@v7` and `aquasecurity/trivy-action` by commit SHA
+(v0.36.0).
 
 ### `shared-commitlint.yml`
 
@@ -701,6 +706,49 @@ jobs:
       BUILD_ARGS: |
         API_URL=${{ secrets.API_URL }}
 ```
+
+### `shared-ci-astro.yml`
+
+Origin: the `quality`, `build` and `e2e` jobs of terracore-page's `ci.yml`.
+Three jobs for an Astro/pnpm repo: `quality` (Prettier, ESLint, `astro check`,
+Vitest with coverage), `build` (needs `quality`, warns instead of failing when
+`dist/` exceeds `dist-size-warning-mb`) and `e2e` (needs `quality`, installs
+only the Chromium browser, no `--with-deps`, since the runner image already
+ships Chrome's system libraries and a job cannot `apt-get`). `ci.yml`'s two
+other jobs are not part of this workflow: secret scanning is unified on
+`shared-gitleaks.yml`, and the dependency audit already has its own
+`shared-security-audit-node.yml`.
+
+- Caller trigger: `pull_request` to `main`, `stg`, `dev`
+- Permissions: `contents: read` per job
+- Checks: `Format & Lint`, `Build`, `E2E (Playwright)`
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner label |
+| `node-version-file` | string | `'.nvmrc'` | Version file passed to `actions/setup-node` |
+| `dist-size-warning-mb` | number | `50` | `build` logs a `::warning::` (does not fail) when `dist/` exceeds this size, in MB |
+| `timeout-minutes-quality` | number | `15` | Time limit of the `quality` job |
+| `timeout-minutes-build` | number | `15` | Time limit of the `build` job |
+| `timeout-minutes-e2e` | number | `20` | Time limit of the `e2e` job |
+
+### `shared-lighthouse.yml`
+
+Origin: terracore-page's `lighthouse.yml`. Builds the site and audits it with
+Lighthouse CI (`treosh/lighthouse-ci-action`, axe-core under the hood for the
+accessibility checks), uploading the report to Lighthouse CI's temporary
+public storage.
+
+- Caller trigger: `push` to `main`/`dev` and `pull_request` to `main`/`stg`/`dev`
+- Permissions: `contents: read`
+- Check: `Lighthouse CI`
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner label |
+| `node-version-file` | string | `'.nvmrc'` | Version file passed to `actions/setup-node` |
+| `config-path` | string | `'./lighthouserc.json'` | Lighthouse CI config, relative to the repo root |
+| `timeout-minutes` | number | `15` | Job time limit |
 <!-- shared-workflows:end -->
 
 ## Actions
