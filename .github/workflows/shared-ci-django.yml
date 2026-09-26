@@ -93,7 +93,7 @@ jobs:
           cache-dependency-path: ${{ inputs.requirements-file }}
 
       - name: Start PostgreSQL
-        uses: ./.github/actions/start-postgres
+        uses: lumina-w/agents/.github/actions/start-postgres@v4
         with:
           database: test_db
           user: test_user
