@@ -32,10 +32,12 @@ the personal Claude Code configuration belongs to `wavival-coding-config`.
 | `shared-pr-title.yml` | Conventional Commits lint of the PR title (the squash commit). | In use by the 8 product repos |
 | `shared-validate-pr-base.yml` | Enforces the PR direction `dev -> stg -> main`. | In use by the 8 product repos |
 | `shared-promote-dev-to-stg.yml` | Opens or reuses the `dev -> stg` promotion PR, waits for its required checks and merges it. | In use by the 8 product repos |
+| `shared-ci-vite-react.yml` | Lint, format check, tests and production build for a Vite + React frontend, plus a build-only Docker check. | New, replaces terracore-front's ci.yml `lint-build-test` and `docker-build` jobs (not yet adopted) |
 | `shared-claude-code-review.yml` | Claude code review with inline comments on the PR. | In use by 5 repos |
 | `shared-codeql.yml` | CodeQL analysis for one language, informational by default. | In use by 3 repos |
 | `shared-security-audit-node.yml` | `npm audit` or `pnpm audit`, informational by default. | In use by 3 repos |
 | `shared-security-audit-python.yml` | `pip-audit` (blocking by default) and `bandit` (informational by default). | In use by 1 repo |
+| `shared-ci-django.yml` | Django backend CI: ruff/black lint, pytest against a throwaway PostgreSQL, migration check, Docker build. | New, not yet called by any repo |
 | `shared-gitleaks.yml` | Secret scan of the PR diff or the pushed commits. | In use by 2 repos |
 | `shared-cd-docker-publish.yml` | Builds a Docker image, scans it with Trivy, pushes it to GHCR and optionally sends a `repository_dispatch`. | In use by 2 repos |
 
@@ -469,6 +471,40 @@ the next promotion PR, and GitHub runs no checks on a conflicting PR
 | `merge-method` | string | `merge` | `merge`, `squash` or `rebase` |
 | `timeout-minutes` | number | `60` | Job time limit |
 
+### `shared-ci-vite-react.yml`
+
+Origin: the `lint-build-test` and `docker-build` jobs of terracore-front's
+`ci.yml` (identical on `dev`, `stg` and `main`). `lint-build-test` installs
+with `npm ci` and runs the format check, lint, tests and the production build
+in that order. `docker-build` only builds the image, without pushing it, to
+catch a broken Dockerfile before merge.
+
+`docker-build` always runs on `ubuntu-latest` and ignores `runner-label`: the
+organization's self-hosted runners are rootless containers with no Docker
+daemon inside the job (see [Runner selection](#runner-selection-runner-label)),
+so `docker/build-push-action` cannot run there at all.
+
+- Caller trigger: the repo's CI (`pull_request`/`push`)
+- Permissions: `contents: read`
+- Checks: `Lint, build & test` and `Docker build (frontend)`
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner label for `lint-build-test` only |
+| `node-version` | string | `"20.x"` | Node version for `lint-build-test` |
+| `context` | string | `'.'` | Docker build context for `docker-build` |
+| `dockerfile` | string | `''` | Dockerfile path from the repo root, for `docker-build`. Empty uses `<context>/Dockerfile` |
+| `timeout-minutes-test` | number | `15` | Time limit of `lint-build-test` |
+| `timeout-minutes-docker` | number | `15` | Time limit of `docker-build` |
+
+```yaml
+jobs:
+  ci:
+    uses: lumina-w/agents/.github/workflows/shared-ci-vite-react.yml@v4
+    with:
+      runner-label: '["self-hosted", "build", "lumina-w"]'
+```
+
 ### `shared-claude-code-review.yml`
 
 Origin: `claude-code-review.yml` (okroot-*, blog-w, luminaw-page). Runs the
@@ -561,6 +597,43 @@ blocking by default) and `bandit` (SAST, informational by default).
 | `bandit-exclude` | string | `*/tests/*,*/migrations/*,*/.venv/*,*/venv/*` | Paths excluded from bandit |
 | `bandit-blocking` | boolean | `false` | `true` fails the check on bandit findings |
 | `timeout-minutes` | number | `15` | Time limit of each job |
+
+### `shared-ci-django.yml`
+
+Origin: the `lint-and-test` and `docker-build` jobs of `ci.yml`
+(terracore-back). Two jobs: `lint-and-test` (ruff, black, Django checks,
+pytest, against a throwaway PostgreSQL) and `docker-build` (`docker compose
+build`, no push).
+
+`lint-and-test` replaces the `services: postgres` container with
+`./.github/actions/start-postgres`: service containers need a Docker daemon,
+which the organization's ephemeral self-hosted runners do not have, so this
+job can run on `runner-label` as well as on `ubuntu-latest`, with the same
+database version and throwaway credentials as before. `docker-build` always
+runs on `ubuntu-latest`: `docker compose build` itself needs a Docker
+daemon, so it is never parameterized to `runner-label`.
+
+ruff and black run from the repo root, where `pyproject.toml` lives, not
+from `working-directory`. black is unpinned by default, matching
+terracore-back today (the repo pins ruff but not black yet); set
+`black-version` to pin it.
+
+- Caller trigger: the repo's CI (`pull_request`)
+- Permissions: `contents: read` (both jobs)
+- Checks: `Lint & test (pytest)` and `Docker build (backend)`
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner for `lint-and-test`. `docker-build` always runs on `ubuntu-latest` |
+| `python-version` | string | `'3.14'` | Python version |
+| `requirements-file` | string | `'backend/requirements/base.txt'` | Requirements file installed and cached, relative to the repo root |
+| `working-directory` | string | `'backend'` | Django project directory (`manage.py`, `requirements/`), relative to the repo root |
+| `ruff-version` | string | `'0.16.0'` | ruff version |
+| `black-version` | string | `''` | Empty installs the latest black, unpinned (today's terracore-back behavior) |
+| `compose-file` | string | `'docker-compose.prod.yml'` | Compose file built by `docker-build`, relative to `working-directory` |
+| `compose-services` | string | `'web nginx'` | Space-separated services passed to `docker compose build` |
+| `timeout-minutes-test` | number | `20` | Time limit of `lint-and-test` |
+| `timeout-minutes-docker` | number | `15` | Time limit of `docker-build` |
 
 ### `shared-gitleaks.yml`
 

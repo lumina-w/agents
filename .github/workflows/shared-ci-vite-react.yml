@@ -1,0 +1,78 @@
+# Reusable workflow: CI checks for a Vite + React frontend (format check,
+# lint, tests, production build) plus a Docker build-only check.
+# Origin: the lint-build-test and docker-build jobs of terracore-front's
+# ci.yml (identical on dev, stg and main).
+#
+# docker-build only builds the image locally to catch a broken Dockerfile
+# before merge; it never pushes. It always runs on ubuntu-latest and is never
+# parametrizable through runner-label, because the organization's self-hosted
+# runners are rootless containers with no Docker daemon inside the job (see
+# "Runner selection" in the README), so docker/build-push-action cannot run
+# there at all.
+
+name: CI Vite + React (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      node-version:
+        type: string
+        default: "20.x"
+      context:
+        type: string
+        default: '.'
+      dockerfile:
+        description: Dockerfile path from the repo root. Empty uses <context>/Dockerfile
+        type: string
+        default: ''
+      timeout-minutes-test:
+        type: number
+        default: 15
+      timeout-minutes-docker:
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  lint-build-test:
+    name: Lint, build & test
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes-test }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+
+      - run: npm ci
+
+      - run: npm run format:check
+
+      - run: npm run lint
+
+      - run: npm run test
+
+      - run: npm run build
+
+  docker-build:
+    name: Docker build (frontend)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes-docker }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: false
