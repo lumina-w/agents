@@ -1,0 +1,12 @@
+# Repos that repo-sync.yml manages: the 8 product repos also listed in
+# README.md's catalog and in AGENTS.md's dev agent callers. Single source for
+# the workflow; update both docs in the same PR that changes this list.
+repos:
+  - terracore-back
+  - terracore-front
+  - terracore-page
+  - okroot-back
+  - okroot-front
+  - okroot-page
+  - blog-w
+  - luminaw-page

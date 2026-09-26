@@ -1,0 +1,240 @@
+# Applies @lumina-w/dev-standards' rules/flow.json to every repo listed in
+# .github/repo-sync.config.yml: branch protection (required checks, the
+# up-to-date requirement, review count, deletion/force-push) and the
+# repo-level merge settings. Manual only, per flow.json's own $comment
+# ("nothing here runs on its own"): a person triggers it, never a schedule
+# or push.
+#
+# Detection, not assumption. For each repo and branch this reads that
+# branch's own .github/workflows/*.yml and checks which shared workflows
+# (shared-ci-*.yml, shared-gitleaks.yml, shared-commitlint.yml,
+# shared-pr-title.yml, shared-validate-pr-base.yml) it actually calls. Only
+# the required_checks whose shared workflow is wired up there are set as
+# required; a branch with none wired up is left untouched, per flow.json's
+# required_checks_note ("skips a branch whose checks it cannot find ...
+# rather than leaving it permanently unmergeable"). dev, stg and main can be
+# at different points in the migration, so this checks each branch on its
+# own, not the repo as a whole.
+#
+# dry_run defaults to true. A dry run never calls a write API: it only
+# prints, per repo and branch, the exact protection payload it would send,
+# or why a branch was skipped. Review that output before a real run, and
+# scope `repos` to one repo for the first one.
+#
+# required_approving_review_count: 0 (every branch, today) is read as "do
+# not send required_pull_request_reviews at all", not as sending 0 to the
+# API, which the classic branch protection endpoint may reject. If
+# dev-standards ever raises a count above 0, this starts sending the object.
+# enforce_admins is not in flow.json; this always sends false, since no
+# branch asks for an administrator override.
+
+name: Sync branch protection from dev-standards
+
+on:
+  workflow_dispatch:
+    inputs:
+      dev_standards_ref:
+        description: Tag of lumina-w/dev-standards to read rules/flow.json from
+        type: string
+        default: v0.3.0
+      repos:
+        description: Comma-separated subset of .github/repo-sync.config.yml (empty = all)
+        type: string
+        default: ''
+      dry_run:
+        description: Print the plan only; no branch protection or repo settings are changed
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: repo-sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate secret
+        env:
+          TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::BRANCH_PROTECTION_TOKEN is not set. See README.md, 'repo-sync.yml' for what it needs."
+            exit 1
+          fi
+
+      - name: Check out agents
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Resolve target repos
+        id: repos
+        env:
+          OVERRIDE: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          yq -o=json '.repos' .github/repo-sync.config.yml > "$RUNNER_TEMP/all-repos.json"
+          if [ -n "$OVERRIDE" ]; then
+            jq -Rc '[split(",")[] | gsub("^\\s+|\\s+$";"") | select(length > 0)]' <<<"$OVERRIDE" > "$RUNNER_TEMP/wanted.json"
+            unknown=$(jq -n --slurpfile all "$RUNNER_TEMP/all-repos.json" --slurpfile w "$RUNNER_TEMP/wanted.json" '$w[0] - $all[0]')
+            if [ "$(jq 'length' <<<"$unknown")" -gt 0 ]; then
+              echo "::error::not in .github/repo-sync.config.yml: $(jq -c . <<<"$unknown")"
+              exit 1
+            fi
+            cp "$RUNNER_TEMP/wanted.json" "$RUNNER_TEMP/target-repos.json"
+          else
+            cp "$RUNNER_TEMP/all-repos.json" "$RUNNER_TEMP/target-repos.json"
+          fi
+          echo "Targets: $(jq -c . "$RUNNER_TEMP/target-repos.json")"
+
+      - name: Fetch flow.json from dev-standards
+        env:
+          GH_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
+          REF: ${{ inputs.dev_standards_ref }}
+        run: |
+          set -euo pipefail
+          gh api "repos/lumina-w/dev-standards/contents/rules/flow.json?ref=$REF" --jq '.content' \
+            | base64 -d > "$RUNNER_TEMP/flow.json"
+          jq . "$RUNNER_TEMP/flow.json" > /dev/null
+
+      - name: Plan and apply
+        env:
+          GH_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, subprocess, sys
+
+          RUNNER_TEMP = os.environ["RUNNER_TEMP"]
+          DRY_RUN = os.environ["DRY_RUN"] == "true"
+          ORG = "lumina-w"
+
+          flow = json.load(open(f"{RUNNER_TEMP}/flow.json"))
+          targets = json.load(open(f"{RUNNER_TEMP}/target-repos.json"))
+          chain = flow["chain"]
+          branches_cfg = flow["branches"]
+          required_checks = flow["required_checks"]
+          repo_settings = flow["repo_settings"]
+          all_methods = {m for ms in repo_settings["allowed_merge_methods"].values() for m in ms}
+
+          # Which shared workflow, if called anywhere in a branch's
+          # .github/workflows/*.yml, satisfies each required check context.
+          SHARED_MARKERS = {
+              "pr-title / PR title (Conventional Commits)": ("shared-pr-title.yml",),
+              "validate-base / PR base must follow dev -> stg -> main": ("shared-validate-pr-base.yml",),
+              "commitlint / Conventional Commits": ("shared-commitlint.yml",),
+              "gitleaks / Secret scan (gitleaks)": ("shared-gitleaks.yml",),
+              "ci / gate": ("shared-ci-django.yml", "shared-ci-vite-react.yml", "shared-ci-astro.yml"),
+          }
+
+          def gh_api(path, method=None, input_json=None, ok404=False):
+              cmd = ["gh", "api", path]
+              if method:
+                  cmd += ["--method", method]
+              if input_json is not None:
+                  cmd += ["--input", "-"]
+              if input_json is not None:
+                  proc = subprocess.run(cmd, input=json.dumps(input_json), capture_output=True, text=True)
+              else:
+                  proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+              if proc.returncode != 0:
+                  if ok404 and "HTTP 404" in proc.stderr:
+                      return None
+                  raise RuntimeError(proc.stderr.strip() or f"gh api {path} failed")
+              return json.loads(proc.stdout) if proc.stdout.strip() else None
+
+          def workflow_text(repo, branch):
+              entries = gh_api(f"repos/{ORG}/{repo}/contents/.github/workflows?ref={branch}", ok404=True)
+              if not entries:
+                  return ""
+              parts = []
+              for entry in entries:
+                  if entry.get("type") != "file" or not entry["name"].endswith((".yml", ".yaml")):
+                      continue
+                  blob = gh_api(f"repos/{ORG}/{repo}/contents/{entry['path']}?ref={branch}", ok404=True)
+                  if blob and blob.get("content"):
+                      parts.append(base64.b64decode(blob["content"]).decode("utf-8", "replace"))
+              return "\n".join(parts)
+
+          rows, errors = [], []
+
+          for repo in targets:
+              repo_patch = {
+                  "delete_branch_on_merge": repo_settings["delete_head_branches_on_merge"],
+                  "allow_squash_merge": "squash" in all_methods,
+                  "allow_merge_commit": "merge" in all_methods,
+                  "allow_rebase_merge": "rebase" in all_methods,
+              }
+              action = "dry-run" if DRY_RUN else "applied"
+              if not DRY_RUN:
+                  try:
+                      gh_api(f"repos/{ORG}/{repo}", method="PATCH", input_json=repo_patch)
+                  except RuntimeError as e:
+                      errors.append(f"{repo}: repo settings: {e}")
+                      action = f"error: {e}"
+              rows.append({"repo": repo, "branch": "(repo settings)", "action": action, "detail": json.dumps(repo_patch)})
+
+              for branch in chain:
+                  cfg = branches_cfg[branch]
+                  try:
+                      text = workflow_text(repo, branch)
+                  except RuntimeError as e:
+                      errors.append(f"{repo}@{branch}: {e}")
+                      rows.append({"repo": repo, "branch": branch, "action": f"error: {e}", "detail": ""})
+                      continue
+
+                  matched, missing = [], []
+                  for check in required_checks:
+                      (matched if any(m in text for m in SHARED_MARKERS[check]) else missing).append(check)
+
+                  if not matched:
+                      rows.append({
+                          "repo": repo, "branch": branch,
+                          "action": "skipped (no shared workflow wired up yet)",
+                          "detail": f"missing: {', '.join(missing)}",
+                      })
+                      continue
+
+                  payload = {
+                      "required_status_checks": {
+                          "strict": cfg["require_branch_up_to_date"],
+                          "checks": [{"context": c} for c in matched],
+                      },
+                      "enforce_admins": False,
+                      "required_pull_request_reviews": (
+                          {"required_approving_review_count": cfg["required_approving_review_count"]}
+                          if cfg["required_approving_review_count"] > 0 else None
+                      ),
+                      "restrictions": None,
+                      "allow_deletions": not cfg["restrict_deletion"],
+                      "allow_force_pushes": not cfg["restrict_force_push"],
+                  }
+                  action = "dry-run" if DRY_RUN else "applied"
+                  if not DRY_RUN:
+                      try:
+                          gh_api(f"repos/{ORG}/{repo}/branches/{branch}/protection", method="PUT", input_json=payload)
+                      except RuntimeError as e:
+                          errors.append(f"{repo}@{branch}: protection: {e}")
+                          action = f"error: {e}"
+                  detail = f"checks: {', '.join(matched)}"
+                  if missing:
+                      detail += f" | not found yet: {', '.join(missing)}"
+                  rows.append({"repo": repo, "branch": branch, "action": action, "detail": detail})
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"# repo-sync ({'dry run, nothing changed' if DRY_RUN else 'applied'})\n\n")
+              f.write("| Repo | Branch | Action | Detail |\n|---|---|---|---|\n")
+              for r in rows:
+                  f.write(f"| {r['repo']} | {r['branch']} | {r['action']} | {r['detail']} |\n")
+
+          if errors:
+              print("Errors:\n" + "\n".join(errors), file=sys.stderr)
+              sys.exit(1)
+          PY

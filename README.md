@@ -1,10 +1,11 @@
 # agents
 
 Central repo of reusable GitHub Actions workflows for the `lumina-w`
-organization. Every workflow here declares only `on: workflow_call`: it does
-nothing by itself. Each product repo (and each `<project>-docs` repo) keeps a
-thin caller that sets the triggers and calls the workflow pinned to the major
-tag, so the logic lives once, here.
+organization. Every workflow here declares only `on: workflow_call`, with one
+exception (`repo-sync.yml`, [below](#repo-syncyml)): it does nothing by
+itself. Each product repo (and each `<project>-docs` repo) keeps a thin
+caller that sets the triggers and calls the workflow pinned to the major tag,
+so the logic lives once, here.
 
 - **Current version:** `v4`, which points to `v4.7.0` (commit `65812d6`,
   agents#21). See [Versioning](#versioning).
@@ -181,10 +182,15 @@ only the tools the runner image ships.
 | | `DISPATCH_TOKEN` | no (yes when dispatching to another repo) | Token for the `repository_dispatch` |
 | `shared-ci-astro.yml` | none | | |
 | `shared-lighthouse.yml` | none | | |
+| `repo-sync.yml` | `BRANCH_PROTECTION_TOKEN` | yes | Reads and writes branch protection and repo settings on every managed repo, and reads `rules/flow.json` from dev-standards |
 
 `CLAUDE_CODE_OAUTH_TOKEN`, `DOCS_SOURCES_READ_TOKEN` and `PROMOTE_TOKEN` are
 organization secrets. `DOCS_SOURCES_READ_TOKEN` is a fine-grained PAT with
 Contents read-only on the code repos, `agents` and the three `*-docs` repos.
+`BRANCH_PROTECTION_TOKEN` is also an organization secret: a fine-grained PAT
+with Administration: write and Contents: read on the 8 product repos, plus
+Contents: read on `dev-standards` (to read `rules/flow.json`). Nobody has
+created it yet; `repo-sync.yml` fails its first step until it exists.
 
 <!-- dev-agent:start -->
 ## Dev agent (`dev-agent.yml`)
@@ -317,6 +323,37 @@ with new commits is kept). Never deletes `dev`, `stg`, `main`, the default
 branch, protected branches or branches with an open PR. Inputs: `dry_run`
 (`false`), `base_branch` (`dev`), `runner-label` (`''`). Callers schedule it every 12 hours because
 "Automatically delete head branches" is not reliable with auto-merge.
+
+### `repo-sync.yml`
+
+The one workflow here that is not `on: workflow_call`: it runs directly in
+this repo, triggered by a person through `workflow_dispatch`, and reaches
+across the organization instead of being called by a single caller. It reads
+`rules/flow.json` from `@lumina-w/dev-standards` at a pinned tag and, for
+every repo listed in `.github/repo-sync.config.yml` (the 8 product repos),
+applies its branch protection (required checks, the up-to-date requirement,
+review count, deletion/force-push) and its repo-level merge settings
+(`delete_branch_on_merge`, the allowed merge methods).
+
+Detection, not assumption: for each repo and branch it reads that branch's
+own `.github/workflows/*.yml` and checks which shared workflows
+(`shared-ci-*.yml`, `shared-gitleaks.yml`, `shared-commitlint.yml`,
+`shared-pr-title.yml`, `shared-validate-pr-base.yml`) it actually calls. Only
+the required checks whose shared workflow is wired up there are set as
+required; a branch with none wired up yet is left untouched, matching
+`flow.json`'s own `required_checks_note`. `dev`, `stg` and `main` can be at
+different points of the migration, so each branch is checked on its own.
+
+`required_approving_review_count: 0` (every branch, today) is read as "do
+not send `required_pull_request_reviews` at all", since the classic branch
+protection endpoint may reject `0` there. `enforce_admins` is not in
+`flow.json`; this always sends `false`.
+
+Inputs: `dev_standards_ref` (`v0.3.0`), `repos` (comma-separated subset of the
+config, `''` for all), `dry_run` (`true`). A dry run never calls a write API:
+it only prints, per repo and branch, the exact protection payload it would
+send, or why a branch was skipped, to the run summary. Review that output
+before a real run, and scope `repos` to one repo for the first one.
 
 <!-- docs-sync:start -->
 ### `docs-sync.yml`

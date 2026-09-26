@@ -1,8 +1,13 @@
 # Contributing to agents
 
 Every workflow in this repo runs inside the organization's product and docs
-repos through the `v4` tag. Moving that tag changes CI for all of them at
-once, so changes follow the steps below.
+repos through the `v4` tag, with one exception: `repo-sync.yml` runs directly
+here, triggered by `workflow_dispatch`, and is not versioned or pinned by
+anyone. A change to it takes effect on `main` as soon as it merges; the steps
+below (branching, PR, README) still apply, but "Releasing" does not.
+
+Moving the `v4` tag changes CI for all `workflow_call` callers at once, so
+changes to those follow the steps below.
 
 ## Workflow
 
