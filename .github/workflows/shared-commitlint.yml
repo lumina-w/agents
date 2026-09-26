@@ -5,7 +5,12 @@
 # ephemeral self-hosted runners, which have no Docker daemon. The range is the
 # push event's `before..after`, so older history is never re-checked. A
 # brand-new branch (or a force push whose `before` is not an ancestor) has no
-# usable `before`: then the commits that no other branch contains are linted.
+# usable `before`: then the commits that no other branch contains are linted,
+# one by one, from the exact list `git rev-list AFTER --not <other branches>`
+# gives. That list is never collapsed back into a `from..to` range: when its
+# oldest commit is a merge, `oldest^` is only its first parent, so the merge's
+# second-parent history (already on some other branch) would not be excluded
+# and would be linted as if new (terracore-front#157, commit 5eae0a4).
 # Rules live in the caller repo's .commitlintrc.json, the same file
 # shared-pr-title.yml checks the PR title against. Callers trigger it on
 # `push: branches: ['**']`.
@@ -89,21 +94,22 @@ jobs:
           if [[ "$BEFORE" =~ ^0+$ ]] || [ -z "$BEFORE" ] \
             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
             || ! git merge-base --is-ancestor "$BEFORE" "$AFTER"; then
-            # New branch or rewritten history: the commits no other branch has.
+            # New branch or rewritten history: lint exactly the commits no
+            # other branch contains, one by one (see the file header for why
+            # this list is never turned back into a `from..to` range).
             mapfile -t others < <(git for-each-ref --format='%(refname)' refs/remotes/origin \
               | grep -v -x -F -e "refs/remotes/origin/$BRANCH" -e refs/remotes/origin/HEAD)
-            oldest=$(git rev-list --reverse "$AFTER" --not "${others[@]}" | head -n 1)
-            if [ -z "$oldest" ]; then
+            git rev-list --reverse "$AFTER" --not "${others[@]}" > "$RUNNER_TEMP/commitlint-shas.txt"
+            if [ ! -s "$RUNNER_TEMP/commitlint-shas.txt" ]; then
               echo "No new commits to lint."
               echo "skip=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            # A root commit has no parent: lint from the start of history.
-            from=$(git rev-parse -q --verify "$oldest^" || true)
+            echo "explicit-list=true" >> "$GITHUB_OUTPUT"
           else
-            from=$BEFORE
+            echo "explicit-list=false" >> "$GITHUB_OUTPUT"
+            echo "from=$BEFORE" >> "$GITHUB_OUTPUT"
           fi
-          echo "from=$from" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
       - name: Install commitlint with the repo's dependencies
         id: deps
@@ -135,6 +141,7 @@ jobs:
       - name: Lint the commits
         if: steps.range.outputs.skip != 'true'
         env:
+          EXPLICIT_LIST: ${{ steps.range.outputs.explicit-list }}
           FROM: ${{ steps.range.outputs.from }}
           LINT_DIR: ${{ steps.deps.outputs.dir || steps.scratch.outputs.dir }}
           LINT_CONFIG: ${{ steps.deps.outputs.config || steps.scratch.outputs.config }}
@@ -142,14 +149,27 @@ jobs:
           set -euo pipefail
           commitlint="$LINT_DIR/node_modules/.bin/commitlint"
           config="$LINT_DIR/$LINT_CONFIG"
-          range="${FROM:+$FROM..}$AFTER"
           bot="dependabot[bot]"
-          # grep reads the whole list (no -q), so git log never gets SIGPIPE.
-          if ! git log --format='%an' "$range" | grep -x -F "$bot" >/dev/null; then
-            "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$config" \
-              ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
-            exit 0
+
+          if [ "$EXPLICIT_LIST" != "true" ]; then
+            range="${FROM:+$FROM..}$AFTER"
+            # grep reads the whole list (no -q), so git log never gets SIGPIPE.
+            if ! git log --format='%an' "$range" | grep -x -F "$bot" >/dev/null; then
+              "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$config" \
+                ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
+              exit 0
+            fi
+            commit_list() { git log --reverse --format='%H%x09%an' "$range"; }
+          else
+            # The exact list from the previous step, not a range: see the
+            # file header for why a merge in that list rules out `from..to`.
+            commit_list() {
+              while read -r sha; do
+                printf '%s\t%s\n' "$sha" "$(git log -1 --format=%an "$sha")"
+              done < "$RUNNER_TEMP/commitlint-shas.txt"
+            }
           fi
+
           # A config next to the repo's one that extends it and turns off only
           # the header length rules the resolved config defines.
           relaxed="$(dirname "$config")/.commitlintrc.dependabot-commits.json"
@@ -174,5 +194,5 @@ jobs:
             git log -1 --format=%B "$sha" \
               | "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$use" --verbose || failed=1
             echo "::endgroup::"
-          done < <(git log --reverse --format='%H%x09%an' "$range")
+          done < <(commit_list)
           exit "$failed"
