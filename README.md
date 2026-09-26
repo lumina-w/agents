@@ -168,7 +168,7 @@ only the tools the runner image ships.
 | `delete-merged-branches.yml` | none | | Uses the workflow token (`contents: write`) |
 | `docs-sync.yml` | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Claude authentication |
 | | `DOCS_SOURCES_READ_TOKEN` | yes | Reads the source repos |
-| `shared-commitlint.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Installs `@lumina-w/dev-standards` over `git+ssh`, only with `install-dependencies: true` |
+| `shared-commitlint.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Installs `@lumina-w/dev-standards` over `git+ssh`, with `install-dependencies: true` or a non-empty `dev-standards-ref` |
 | `shared-pr-title.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Same |
 | `shared-validate-pr-base.yml` | none | | |
 | `shared-promote-dev-to-stg.yml` | `PROMOTE_TOKEN` | yes | A PR opened with the workflow token would not trigger the required checks |
@@ -400,13 +400,14 @@ rule it relaxes: it never skips type, scope or any other rule.
 |---|---|---|---|
 | `runner-label` | string | `''` | Runner label |
 | `config-file` | string | `.commitlintrc.json` | commitlint config of the repo. The job fails if the file is missing |
-| `install-dependencies` | boolean | `false` | `true` runs `npm ci` first, for an `extends` that names a package from the repo's `package.json` (`@lumina-w/dev-standards`) |
+| `install-dependencies` | boolean | `false` | `true` runs `npm ci` first, for an `extends` that names a package from the repo's `package.json` (`@lumina-w/dev-standards`). Ties every job in the repo that runs `npm ci` to `DEV_STANDARDS_DEPLOY_KEY`, so it only fits a repo that already has a `package.json` for other reasons (terracore-back) |
+| `dev-standards-ref` | string | `''` | A `dev-standards` tag (`v0.3.0`). Clones it straight into the scratch install so `extends: ["@lumina-w/dev-standards/commitlint"]` resolves with no change to the consumer's own `package.json`. Prefer this for a new consumer; ignored when `install-dependencies` is `true` |
 | `node-version` | string | `'22'` | Node used to install and run commitlint |
 | `commitlint-version` | string | `'21'` | Major version of `@commitlint/cli` (and `@commitlint/config-conventional` without `install-dependencies`) |
 
 | Secret | Required | Use |
 |---|---|---|
-| `DEV_STANDARDS_DEPLOY_KEY` | no | Read-only deploy key to install `@lumina-w/dev-standards` over `git+ssh`. Only used with `install-dependencies: true` |
+| `DEV_STANDARDS_DEPLOY_KEY` | no | Read-only deploy key to install `@lumina-w/dev-standards` over `git+ssh`. Used with `install-dependencies: true` or a non-empty `dev-standards-ref` |
 
 ### `shared-pr-title.yml`
 
@@ -433,7 +434,8 @@ the rest still apply. PRs opened by anyone else are linted as is.
 | `config-file` | string | `.commitlintrc.json` | commitlint config of the repo |
 | `node-version` | string | `'22'` | Node used to install commitlint |
 | `commitlint-version` | string | `'21'` | Major version of `@commitlint/cli` and `@commitlint/config-conventional` |
-| `install-dependencies` | boolean | `false` | `true` runs `npm ci` and lints from the repo root, for an `extends` that names a package of the repo. Only adds `@commitlint/cli`, without touching `package.json` |
+| `install-dependencies` | boolean | `false` | `true` runs `npm ci` and lints from the repo root, for an `extends` that names a package of the repo. Only adds `@commitlint/cli`, without touching `package.json`. Ties every job in the repo that runs `npm ci` to `DEV_STANDARDS_DEPLOY_KEY` |
+| `dev-standards-ref` | string | `''` | A `dev-standards` tag (`v0.3.0`). Clones it straight into the scratch install so `extends: ["@lumina-w/dev-standards/commitlint"]` resolves with no change to the consumer's own `package.json`. Prefer this for a new consumer; ignored when `install-dependencies` is `true` |
 
 | Secret | Required | Use |
 |---|---|---|
@@ -784,20 +786,23 @@ steps:
 `@lumina-w/dev-standards` is the source of truth for the commit rules and the
 branch chain; this repo runs checks in CI.
 
-- **Today.** `shared-commitlint.yml` and `shared-pr-title.yml` lint against
-  the caller repo's own `.commitlintrc.json`. With
-  `install-dependencies: true` they first run `npm ci` in the caller repo,
-  loading `DEV_STANDARDS_DEPLOY_KEY` with `webfactory/ssh-agent`, so a config
-  that extends `@lumina-w/dev-standards/commitlint` resolves. The caller
-  still has to carry a `package.json`, a lockfile and the deploy key. Only
-  terracore-back does this. The other seven repos lint against a local copy
-  of the rules as they were in dev-standards 0.1.0: no `billing` scope, and
-  the ` (#<number>)` a squash merge appends counts toward the 72 characters
+- **Two ways to resolve `extends: ["@lumina-w/dev-standards/commitlint"]`.**
+  `install-dependencies: true` runs `npm ci` in the caller repo, loading
+  `DEV_STANDARDS_DEPLOY_KEY` with `webfactory/ssh-agent`, so the config
+  resolves from the repo's own `node_modules`. The caller has to carry a
+  `package.json`, a lockfile and the deploy key, and every job in that repo
+  that runs `npm ci` now needs the key too, whether it touches commit rules
+  or not; only terracore-back does this, since it already has a `package.json`
+  for no other reason. `dev-standards-ref: vX.Y.Z` instead clones
+  `dev-standards` at that tag straight into the scratch install (the same
+  isolated temp dir the default path already uses for `@commitlint/cli`),
+  with the same deploy key, so the caller needs only the one-line
+  `.commitlintrc.json` and never touches its own `package.json` or its other
+  jobs' `npm ci`/`pnpm install`. Prefer this for a new consumer.
+  The remaining repos without either input lint against a local copy of the
+  rules as they were in dev-standards 0.1.0: no `billing` scope, and the
+  ` (#<number>)` a squash merge appends counts toward the 72 characters
   (0.2.0 stops counting it).
-- **Pending design, not implemented.** The two workflows would install
-  dev-standards themselves with the deploy key, so a consumer would need only
-  the one-line `.commitlintrc.json` and the install logic would live here once.
-  No workflow does this yet.
 - `shared-validate-pr-base.yml` is the server-side counterpart of the
   dev-standards push chain: it checks the PR direction `dev -> stg -> main`.
 

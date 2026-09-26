@@ -166,7 +166,12 @@ jobs:
         env:
           COMPOSE_FILE: ${{ inputs.compose-file }}
           COMPOSE_SERVICES: ${{ inputs.compose-services }}
-        run: docker compose -f "$COMPOSE_FILE" build $COMPOSE_SERVICES
+        run: |
+          # COMPOSE_SERVICES is a trusted, space-separated input (never
+          # PR-controlled text), and the word split is intentional: each
+          # word is its own service.
+          # shellcheck disable=SC2086
+          docker compose -f "$COMPOSE_FILE" build $COMPOSE_SERVICES
 
   gate:
     name: gate

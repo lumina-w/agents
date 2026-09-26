@@ -9,7 +9,16 @@
 # install-dependencies: true lints from the repo root after `npm ci`, for a
 # config whose `extends` names a package from the repo's package.json
 # (@lumina-w/dev-standards). When that package is a private git+ssh
-# dependency, the caller passes DEV_STANDARDS_DEPLOY_KEY.
+# dependency, the caller passes DEV_STANDARDS_DEPLOY_KEY. This makes every
+# job that runs `npm ci` in the consumer repo need that credential, not just
+# this one, so it only fits a repo where a package.json already exists for
+# other reasons (terracore-back).
+#
+# dev-standards-ref instead clones @lumina-w/dev-standards straight into the
+# scratch install (below), at that tag, with the same DEV_STANDARDS_DEPLOY_KEY.
+# The consumer never adds it to its own package.json, so this fits any repo.
+# Prefer this for a new consumer; install-dependencies remains for the one
+# that already uses the other shape.
 #
 # PRs opened by dependabot[bot] are linted without the header length rules
 # (header-max-length and dev-standards' header-max-length-no-pr-suffix):
@@ -36,6 +45,10 @@ on:
       install-dependencies:
         type: boolean
         default: false
+      dev-standards-ref:
+        description: "A dev-standards tag (v0.3.0). Clones it into the scratch install so extends: ['@lumina-w/dev-standards/commitlint'] resolves with no change to the consumer's own package.json. Ignored when install-dependencies is true"
+        type: string
+        default: ''
     secrets:
       DEV_STANDARDS_DEPLOY_KEY:
         required: false
@@ -65,7 +78,7 @@ jobs:
       # was passed without printing it.
       - name: Check for the deploy key
         id: deploy-key
-        if: inputs.install-dependencies
+        if: inputs.install-dependencies || inputs.dev-standards-ref != ''
         env:
           DEPLOY_KEY: ${{ secrets.DEV_STANDARDS_DEPLOY_KEY }}
         run: echo "present=$([ -n "$DEPLOY_KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -88,9 +101,12 @@ jobs:
       - name: Install commitlint
         id: scratch
         if: ${{ !inputs.install-dependencies }}
+        env:
+          DEV_STANDARDS_REF: ${{ inputs.dev-standards-ref }}
         run: |
           # commitlint resolves `extends` from the config file's own directory,
           # so the config is linted from a scratch dir holding the packages.
+          set -euo pipefail
           dir="$RUNNER_TEMP/commitlint"
           mkdir -p "$dir"
           cp "$CONFIG_FILE" "$dir/"
@@ -98,6 +114,16 @@ jobs:
           npm init -y >/dev/null
           npm install --no-audit --no-fund --silent \
             "@commitlint/cli@$COMMITLINT_VERSION" "@commitlint/config-conventional@$COMMITLINT_VERSION"
+          # A config that extends @lumina-w/dev-standards/commitlint needs the
+          # package itself in the scratch node_modules: it is not on any
+          # registry. Cloned at the pinned tag, never the consumer's own
+          # package.json, so this never touches its npm ci/pnpm install.
+          if [ -n "$DEV_STANDARDS_REF" ]; then
+            mkdir -p "$dir/node_modules/@lumina-w"
+            GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new" \
+              git clone --quiet --depth 1 --branch "$DEV_STANDARDS_REF" \
+              git@github.com:lumina-w/dev-standards.git "$dir/node_modules/@lumina-w/dev-standards"
+          fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "config=$(basename "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
       - name: Lint the PR title
