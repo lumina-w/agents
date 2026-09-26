@@ -1,0 +1,190 @@
+# Reusable workflow: Django backend CI (lint, test, migration check, Docker
+# build). Origin: the `lint-and-test` and `docker-build` jobs of ci.yml
+# (terracore-back).
+#
+# lint-and-test uses the start-postgres composite action instead of a
+# `services: postgres` container: service containers need a Docker daemon,
+# which the organization's ephemeral self-hosted runners do not have. Using
+# start-postgres lets this job run on runner-label as well as on
+# ubuntu-latest, without changing the database behavior (same version, same
+# throwaway credentials).
+#
+# ruff and black run from the repo root, not from working-directory: that is
+# where pyproject.toml lives, and the root also holds files a run from a
+# subdirectory would never see. black is unpinned by default, matching
+# terracore-back today (the repo pins ruff but not black yet); set
+# black-version to pin it once a repo wants that.
+#
+# docker-build always runs on ubuntu-latest: `docker compose build` needs a
+# Docker daemon, which the organization's ephemeral runner does not have. It
+# is never parameterized to runner-label.
+
+name: CI Django (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        description: Runner for lint-and-test. docker-build always runs on ubuntu-latest
+        type: string
+        default: ''
+      python-version:
+        type: string
+        default: '3.14'
+      requirements-file:
+        description: Requirements file installed and cached, relative to the repo root
+        type: string
+        default: 'backend/requirements/base.txt'
+      working-directory:
+        description: Django project directory (manage.py, requirements/), relative to the repo root
+        type: string
+        default: 'backend'
+      ruff-version:
+        type: string
+        default: '0.16.0'
+      black-version:
+        description: Empty installs the latest black, unpinned (today's terracore-back behavior)
+        type: string
+        default: ''
+      compose-file:
+        description: Compose file built by docker-build, relative to working-directory
+        type: string
+        default: 'docker-compose.prod.yml'
+      compose-services:
+        description: Space-separated services passed to `docker compose build`
+        type: string
+        default: 'web nginx'
+      timeout-minutes-test:
+        type: number
+        default: 20
+      timeout-minutes-docker:
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  lint-and-test:
+    name: Lint & test (pytest)
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes-test }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.ci
+      SECRET_KEY: ci-only-not-used-in-production
+      DEBUG: "True"
+      ALLOWED_HOSTS: localhost
+      DB_NAME: test_db
+      DB_USER: test_user
+      DB_PASSWORD: test_pass
+      DB_HOST: localhost
+      DB_PORT: 5432
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.requirements-file }}
+
+      - name: Start PostgreSQL
+        uses: ./.github/actions/start-postgres
+        with:
+          database: test_db
+          user: test_user
+          password: test_pass
+
+      - name: Install dependencies
+        env:
+          REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+          WORKING_DIR: ${{ inputs.working-directory }}
+        run: |
+          req="$REQUIREMENTS_FILE"
+          if [[ "$req" == "$WORKING_DIR"/* ]]; then
+            req="${req#"$WORKING_DIR"/}"
+          fi
+          pip install -r "$req"
+
+      # black is only pinned when black-version is set: ruff is pinned so its
+      # rule set does not shift under CI between runs, but the repo pins
+      # black nowhere yet.
+      - name: Install linters
+        working-directory: ${{ github.workspace }}
+        env:
+          RUFF_VERSION: ${{ inputs.ruff-version }}
+          BLACK_VERSION: ${{ inputs.black-version }}
+        run: |
+          if [ -n "$BLACK_VERSION" ]; then
+            pip install "ruff==$RUFF_VERSION" "black==$BLACK_VERSION"
+          else
+            pip install "ruff==$RUFF_VERSION" black
+          fi
+
+      - name: ruff check
+        # From the repo root, overriding the job's working-directory default:
+        # pyproject.toml lives there, and the root holds files a run from
+        # working-directory would never see. ruff resolves per-file-ignores
+        # against the directory holding pyproject.toml rather than against
+        # the cwd, so those apply either way; the reason to run from the
+        # root is coverage.
+        working-directory: ${{ github.workspace }}
+        run: ruff check .
+
+      - name: black --check
+        working-directory: ${{ github.workspace }}
+        run: black --check .
+
+      - name: Django system check
+        run: python3 -m django check --settings=config.settings.ci
+
+      - name: Check no pending migrations
+        run: python3 -m django makemigrations --check --dry-run --settings=config.settings.ci
+
+      - name: Run tests
+        run: python3 -m pytest --tb=short -q
+
+  docker-build:
+    name: Docker build (backend)
+    # Always ubuntu-latest, never runner-label: `docker compose build` needs a
+    # Docker daemon, which the organization's ephemeral self-hosted runner
+    # does not have.
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes-docker }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # No push: this only proves the images still build.
+      - name: Build backend images
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          COMPOSE_SERVICES: ${{ inputs.compose-services }}
+        run: |
+          # COMPOSE_SERVICES is a trusted, space-separated input (never
+          # PR-controlled text), and the word split is intentional: each
+          # word is its own service.
+          # shellcheck disable=SC2086
+          docker compose -f "$COMPOSE_FILE" build $COMPOSE_SERVICES
+
+  gate:
+    name: gate
+    # Always ubuntu-latest: trivial job, keeps it off the organization's
+    # single-slot self-hosted runner queue.
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, docker-build]
+    if: always()
+    steps:
+      - name: Check required jobs
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || \
+             [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more required jobs failed or were cancelled."
+            exit 1
+          fi

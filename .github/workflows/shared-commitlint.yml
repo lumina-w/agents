@@ -5,7 +5,12 @@
 # ephemeral self-hosted runners, which have no Docker daemon. The range is the
 # push event's `before..after`, so older history is never re-checked. A
 # brand-new branch (or a force push whose `before` is not an ancestor) has no
-# usable `before`: then the commits that no other branch contains are linted.
+# usable `before`: then the commits that no other branch contains are linted,
+# one by one, from the exact list `git rev-list AFTER --not <other branches>`
+# gives. That list is never collapsed back into a `from..to` range: when its
+# oldest commit is a merge, `oldest^` is only its first parent, so the merge's
+# second-parent history (already on some other branch) would not be excluded
+# and would be linted as if new (terracore-front#157, commit 5eae0a4).
 # Rules live in the caller repo's .commitlintrc.json, the same file
 # shared-pr-title.yml checks the PR title against. Callers trigger it on
 # `push: branches: ['**']`.
@@ -13,7 +18,17 @@
 # install-dependencies: true runs `npm ci` first, for a config whose `extends`
 # names a package from the repo's package.json (@lumina-w/dev-standards).
 # When that package is a private git+ssh dependency, the caller passes
-# DEV_STANDARDS_DEPLOY_KEY.
+# DEV_STANDARDS_DEPLOY_KEY. This makes every job that runs `npm ci` in the
+# consumer repo need that credential, not just this one, so it only fits a
+# repo where a package.json already exists for other reasons (terracore-back).
+#
+# dev-standards-ref instead clones @lumina-w/dev-standards straight into the
+# scratch install (below), at that tag, with the same DEV_STANDARDS_DEPLOY_KEY.
+# The consumer never adds it to its own package.json, so this fits any repo,
+# including one whose own `npm ci`/`pnpm install` must stay untouched by a
+# credential it has nothing to do with. Prefer this over install-dependencies
+# for a new consumer; install-dependencies remains for the one that already
+# uses the other shape.
 #
 # Commits authored by dependabot[bot] are linted without the header length
 # rules (header-max-length and dev-standards' header-max-length-no-pr-suffix),
@@ -37,6 +52,10 @@ on:
       install-dependencies:
         type: boolean
         default: false
+      dev-standards-ref:
+        description: "A dev-standards tag (v0.3.0). Clones it into the scratch install so extends: ['@lumina-w/dev-standards/commitlint'] resolves with no change to the consumer's own package.json. Ignored when install-dependencies is true"
+        type: string
+        default: ''
       node-version:
         type: string
         default: '22'
@@ -74,7 +93,7 @@ jobs:
       # was passed without printing it.
       - name: Check for the deploy key
         id: deploy-key
-        if: inputs.install-dependencies
+        if: inputs.install-dependencies || inputs.dev-standards-ref != ''
         env:
           DEPLOY_KEY: ${{ secrets.DEV_STANDARDS_DEPLOY_KEY }}
         run: echo "present=$([ -n "$DEPLOY_KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -89,21 +108,22 @@ jobs:
           if [[ "$BEFORE" =~ ^0+$ ]] || [ -z "$BEFORE" ] \
             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
             || ! git merge-base --is-ancestor "$BEFORE" "$AFTER"; then
-            # New branch or rewritten history: the commits no other branch has.
+            # New branch or rewritten history: lint exactly the commits no
+            # other branch contains, one by one (see the file header for why
+            # this list is never turned back into a `from..to` range).
             mapfile -t others < <(git for-each-ref --format='%(refname)' refs/remotes/origin \
               | grep -v -x -F -e "refs/remotes/origin/$BRANCH" -e refs/remotes/origin/HEAD)
-            oldest=$(git rev-list --reverse "$AFTER" --not "${others[@]}" | head -n 1)
-            if [ -z "$oldest" ]; then
+            git rev-list --reverse "$AFTER" --not "${others[@]}" > "$RUNNER_TEMP/commitlint-shas.txt"
+            if [ ! -s "$RUNNER_TEMP/commitlint-shas.txt" ]; then
               echo "No new commits to lint."
               echo "skip=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            # A root commit has no parent: lint from the start of history.
-            from=$(git rev-parse -q --verify "$oldest^" || true)
+            echo "explicit-list=true" >> "$GITHUB_OUTPUT"
           else
-            from=$BEFORE
+            echo "explicit-list=false" >> "$GITHUB_OUTPUT"
+            echo "from=$BEFORE" >> "$GITHUB_OUTPUT"
           fi
-          echo "from=$from" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
       - name: Install commitlint with the repo's dependencies
         id: deps
@@ -121,20 +141,34 @@ jobs:
       - name: Install commitlint
         id: scratch
         if: ${{ !inputs.install-dependencies && steps.range.outputs.skip != 'true' }}
+        env:
+          DEV_STANDARDS_REF: ${{ inputs.dev-standards-ref }}
         run: |
           # commitlint resolves `extends` from the config file's own directory,
           # so the config is linted from a scratch dir holding the packages.
+          set -euo pipefail
           [ -f "$CONFIG_FILE" ] || { echo "::error::$CONFIG_FILE not found"; exit 1; }
           dir="$RUNNER_TEMP/commitlint"
           mkdir -p "$dir"
           cp "$CONFIG_FILE" "$dir/"
           (cd "$dir" && npm init -y >/dev/null && npm install --no-audit --no-fund --silent \
             "@commitlint/cli@$COMMITLINT_VERSION" "@commitlint/config-conventional@$COMMITLINT_VERSION")
+          # A config that extends @lumina-w/dev-standards/commitlint needs the
+          # package itself in the scratch node_modules: it is not on any
+          # registry. Cloned at the pinned tag, never the consumer's own
+          # package.json, so this never touches its npm ci/pnpm install.
+          if [ -n "$DEV_STANDARDS_REF" ]; then
+            mkdir -p "$dir/node_modules/@lumina-w"
+            GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new" \
+              git clone --quiet --depth 1 --branch "$DEV_STANDARDS_REF" \
+              git@github.com:lumina-w/dev-standards.git "$dir/node_modules/@lumina-w/dev-standards"
+          fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "config=$(basename "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
       - name: Lint the commits
         if: steps.range.outputs.skip != 'true'
         env:
+          EXPLICIT_LIST: ${{ steps.range.outputs.explicit-list }}
           FROM: ${{ steps.range.outputs.from }}
           LINT_DIR: ${{ steps.deps.outputs.dir || steps.scratch.outputs.dir }}
           LINT_CONFIG: ${{ steps.deps.outputs.config || steps.scratch.outputs.config }}
@@ -142,14 +176,27 @@ jobs:
           set -euo pipefail
           commitlint="$LINT_DIR/node_modules/.bin/commitlint"
           config="$LINT_DIR/$LINT_CONFIG"
-          range="${FROM:+$FROM..}$AFTER"
           bot="dependabot[bot]"
-          # grep reads the whole list (no -q), so git log never gets SIGPIPE.
-          if ! git log --format='%an' "$range" | grep -x -F "$bot" >/dev/null; then
-            "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$config" \
-              ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
-            exit 0
+
+          if [ "$EXPLICIT_LIST" != "true" ]; then
+            range="${FROM:+$FROM..}$AFTER"
+            # grep reads the whole list (no -q), so git log never gets SIGPIPE.
+            if ! git log --format='%an' "$range" | grep -x -F "$bot" >/dev/null; then
+              "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$config" \
+                ${FROM:+--from "$FROM"} --to "$AFTER" --verbose
+              exit 0
+            fi
+            commit_list() { git log --reverse --format='%H%x09%an' "$range"; }
+          else
+            # The exact list from the previous step, not a range: see the
+            # file header for why a merge in that list rules out `from..to`.
+            commit_list() {
+              while read -r sha; do
+                printf '%s\t%s\n' "$sha" "$(git log -1 --format=%an "$sha")"
+              done < "$RUNNER_TEMP/commitlint-shas.txt"
+            }
           fi
+
           # A config next to the repo's one that extends it and turns off only
           # the header length rules the resolved config defines.
           relaxed="$(dirname "$config")/.commitlintrc.dependabot-commits.json"
@@ -174,5 +221,5 @@ jobs:
             git log -1 --format=%B "$sha" \
               | "$commitlint" --cwd "$GITHUB_WORKSPACE" --config "$use" --verbose || failed=1
             echo "::endgroup::"
-          done < <(git log --reverse --format='%H%x09%an' "$range")
+          done < <(commit_list)
           exit "$failed"

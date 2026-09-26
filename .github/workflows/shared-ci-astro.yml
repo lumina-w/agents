@@ -1,0 +1,152 @@
+# Reusable workflow: CI for Astro/pnpm product repos (format+lint, build, E2E).
+# Origin: the quality, build and e2e jobs of ci.yml (terracore-page).
+#
+# The secret scan (trufflehog in terracore-page's ci.yml) is not part of this
+# workflow: the organization scans secrets with a single tool,
+# shared-gitleaks.yml. The dependency audit already has its own reusable
+# workflow, shared-security-audit-node.yml.
+
+name: CI Astro (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        type: string
+        default: ''
+      node-version-file:
+        description: File with the Node version (.nvmrc, ...)
+        type: string
+        default: '.nvmrc'
+      dist-size-warning-mb:
+        description: Warns (does not fail) when dist/ exceeds this size, in MB
+        type: number
+        default: 50
+      timeout-minutes-quality:
+        type: number
+        default: 15
+      timeout-minutes-build:
+        type: number
+        default: 15
+      timeout-minutes-e2e:
+        type: number
+        default: 20
+
+permissions: {}
+
+jobs:
+  quality:
+    name: Format & Lint
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes-quality }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6.1.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prettier check
+        run: pnpm run format:check
+
+      - name: ESLint
+        run: pnpm run lint
+
+      - name: TypeScript check
+        run: pnpm run typecheck
+
+      - name: Unit tests + coverage gate
+        run: pnpm run test:coverage
+
+  build:
+    name: Build
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    needs: quality
+    timeout-minutes: ${{ inputs.timeout-minutes-build }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6.1.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Check dist size
+        run: |
+          SIZE=$(du -sm dist/ | cut -f1)
+          echo "Build size: ${SIZE}MB"
+          if [ "$SIZE" -gt "$DIST_SIZE_WARNING_MB" ]; then
+            echo "::warning::Build size ${SIZE}MB exceeds ${DIST_SIZE_WARNING_MB}MB threshold"
+          fi
+        env:
+          DIST_SIZE_WARNING_MB: ${{ inputs.dist-size-warning-mb }}
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    needs: quality
+    timeout-minutes: ${{ inputs.timeout-minutes-e2e }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6.1.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        # No --with-deps: the runner image already ships Chrome's system libraries
+        # and a job cannot apt-get (no sudo).
+        run: pnpm exec playwright install chromium
+
+      - name: Run E2E tests
+        run: pnpm run test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  gate:
+    name: gate
+    # Always ubuntu-latest: trivial job, keeps it off the organization's
+    # single-slot self-hosted runner queue.
+    runs-on: ubuntu-latest
+    needs: [quality, build, e2e]
+    if: always()
+    steps:
+      - name: Check required jobs
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || \
+             [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more required jobs failed or were cancelled."
+            exit 1
+          fi

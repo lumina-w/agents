@@ -32,12 +32,16 @@ the personal Claude Code configuration belongs to `wavival-coding-config`.
 | `shared-pr-title.yml` | Conventional Commits lint of the PR title (the squash commit). | In use by the 8 product repos |
 | `shared-validate-pr-base.yml` | Enforces the PR direction `dev -> stg -> main`. | In use by the 8 product repos |
 | `shared-promote-dev-to-stg.yml` | Opens or reuses the `dev -> stg` promotion PR, waits for its required checks and merges it. | In use by the 8 product repos |
+| `shared-ci-vite-react.yml` | Lint, format check, tests and production build for a Vite + React frontend, plus a build-only Docker check. | New, replaces terracore-front's ci.yml `lint-build-test` and `docker-build` jobs (not yet adopted) |
 | `shared-claude-code-review.yml` | Claude code review with inline comments on the PR. | In use by 5 repos |
 | `shared-codeql.yml` | CodeQL analysis for one language, informational by default. | In use by 3 repos |
 | `shared-security-audit-node.yml` | `npm audit` or `pnpm audit`, informational by default. | In use by 3 repos |
 | `shared-security-audit-python.yml` | `pip-audit` (blocking by default) and `bandit` (informational by default). | In use by 1 repo |
+| `shared-ci-django.yml` | Django backend CI: ruff/black lint, pytest against a throwaway PostgreSQL, migration check, Docker build. | New, not yet called by any repo |
 | `shared-gitleaks.yml` | Secret scan of the PR diff or the pushed commits. | In use by 2 repos |
 | `shared-cd-docker-publish.yml` | Builds a Docker image, scans it with Trivy, pushes it to GHCR and optionally sends a `repository_dispatch`. | In use by 2 repos |
+| `shared-ci-astro.yml` | Astro/pnpm CI: format/lint/typecheck/unit tests, build with a dist size warning, Playwright E2E. | New, not yet called by any repo |
+| `shared-lighthouse.yml` | Lighthouse CI (performance, accessibility, SEO) for pnpm projects. | New, not yet called by any repo |
 
 | Action | Purpose | Status |
 |---|---|---|
@@ -164,7 +168,7 @@ only the tools the runner image ships.
 | `delete-merged-branches.yml` | none | | Uses the workflow token (`contents: write`) |
 | `docs-sync.yml` | `CLAUDE_CODE_OAUTH_TOKEN` | yes | Claude authentication |
 | | `DOCS_SOURCES_READ_TOKEN` | yes | Reads the source repos |
-| `shared-commitlint.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Installs `@lumina-w/dev-standards` over `git+ssh`, only with `install-dependencies: true` |
+| `shared-commitlint.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Installs `@lumina-w/dev-standards` over `git+ssh`, with `install-dependencies: true` or a non-empty `dev-standards-ref` |
 | `shared-pr-title.yml` | `DEV_STANDARDS_DEPLOY_KEY` | no | Same |
 | `shared-validate-pr-base.yml` | none | | |
 | `shared-promote-dev-to-stg.yml` | `PROMOTE_TOKEN` | yes | A PR opened with the workflow token would not trigger the required checks |
@@ -175,6 +179,8 @@ only the tools the runner image ships.
 | `shared-gitleaks.yml` | `GITLEAKS_LICENSE` | no in the schema, needed in practice | The action requires it for organization repos. It must also exist in the Dependabot secret store |
 | `shared-cd-docker-publish.yml` | `BUILD_ARGS` | no | Secret build args, `KEY=value` per line |
 | | `DISPATCH_TOKEN` | no (yes when dispatching to another repo) | Token for the `repository_dispatch` |
+| `shared-ci-astro.yml` | none | | |
+| `shared-lighthouse.yml` | none | | |
 
 `CLAUDE_CODE_OAUTH_TOKEN`, `DOCS_SOURCES_READ_TOKEN` and `PROMOTE_TOKEN` are
 organization secrets. `DOCS_SOURCES_READ_TOKEN` is a fine-grained PAT with
@@ -361,8 +367,9 @@ Third-party actions are pinned: `actions/checkout@v7`,
 `docker/metadata-action@v6`, `github/codeql-action@v4`,
 `webfactory/ssh-agent@v0.10.0`,
 `gitleaks/gitleaks-action@v3`, `anthropics/claude-code-action@v1`,
-`peter-evans/repository-dispatch@v4` and `aquasecurity/trivy-action` by
-commit SHA (v0.36.0).
+`peter-evans/repository-dispatch@v4`, `treosh/lighthouse-ci-action@v12`,
+`actions/upload-artifact@v7` and `aquasecurity/trivy-action` by commit SHA
+(v0.36.0).
 
 ### `shared-commitlint.yml`
 
@@ -393,13 +400,14 @@ rule it relaxes: it never skips type, scope or any other rule.
 |---|---|---|---|
 | `runner-label` | string | `''` | Runner label |
 | `config-file` | string | `.commitlintrc.json` | commitlint config of the repo. The job fails if the file is missing |
-| `install-dependencies` | boolean | `false` | `true` runs `npm ci` first, for an `extends` that names a package from the repo's `package.json` (`@lumina-w/dev-standards`) |
+| `install-dependencies` | boolean | `false` | `true` runs `npm ci` first, for an `extends` that names a package from the repo's `package.json` (`@lumina-w/dev-standards`). Ties every job in the repo that runs `npm ci` to `DEV_STANDARDS_DEPLOY_KEY`, so it only fits a repo that already has a `package.json` for other reasons (terracore-back) |
+| `dev-standards-ref` | string | `''` | A `dev-standards` tag (`v0.3.0`). Clones it straight into the scratch install so `extends: ["@lumina-w/dev-standards/commitlint"]` resolves with no change to the consumer's own `package.json`. Prefer this for a new consumer; ignored when `install-dependencies` is `true` |
 | `node-version` | string | `'22'` | Node used to install and run commitlint |
 | `commitlint-version` | string | `'21'` | Major version of `@commitlint/cli` (and `@commitlint/config-conventional` without `install-dependencies`) |
 
 | Secret | Required | Use |
 |---|---|---|
-| `DEV_STANDARDS_DEPLOY_KEY` | no | Read-only deploy key to install `@lumina-w/dev-standards` over `git+ssh`. Only used with `install-dependencies: true` |
+| `DEV_STANDARDS_DEPLOY_KEY` | no | Read-only deploy key to install `@lumina-w/dev-standards` over `git+ssh`. Used with `install-dependencies: true` or a non-empty `dev-standards-ref` |
 
 ### `shared-pr-title.yml`
 
@@ -426,7 +434,8 @@ the rest still apply. PRs opened by anyone else are linted as is.
 | `config-file` | string | `.commitlintrc.json` | commitlint config of the repo |
 | `node-version` | string | `'22'` | Node used to install commitlint |
 | `commitlint-version` | string | `'21'` | Major version of `@commitlint/cli` and `@commitlint/config-conventional` |
-| `install-dependencies` | boolean | `false` | `true` runs `npm ci` and lints from the repo root, for an `extends` that names a package of the repo. Only adds `@commitlint/cli`, without touching `package.json` |
+| `install-dependencies` | boolean | `false` | `true` runs `npm ci` and lints from the repo root, for an `extends` that names a package of the repo. Only adds `@commitlint/cli`, without touching `package.json`. Ties every job in the repo that runs `npm ci` to `DEV_STANDARDS_DEPLOY_KEY` |
+| `dev-standards-ref` | string | `''` | A `dev-standards` tag (`v0.3.0`). Clones it straight into the scratch install so `extends: ["@lumina-w/dev-standards/commitlint"]` resolves with no change to the consumer's own `package.json`. Prefer this for a new consumer; ignored when `install-dependencies` is `true` |
 
 | Secret | Required | Use |
 |---|---|---|
@@ -468,6 +477,40 @@ the next promotion PR, and GitHub runs no checks on a conflicting PR
 | `target-branch` | string | `stg` | Target branch |
 | `merge-method` | string | `merge` | `merge`, `squash` or `rebase` |
 | `timeout-minutes` | number | `60` | Job time limit |
+
+### `shared-ci-vite-react.yml`
+
+Origin: the `lint-build-test` and `docker-build` jobs of terracore-front's
+`ci.yml` (identical on `dev`, `stg` and `main`). `lint-build-test` installs
+with `npm ci` and runs the format check, lint, tests and the production build
+in that order. `docker-build` only builds the image, without pushing it, to
+catch a broken Dockerfile before merge.
+
+`docker-build` always runs on `ubuntu-latest` and ignores `runner-label`: the
+organization's self-hosted runners are rootless containers with no Docker
+daemon inside the job (see [Runner selection](#runner-selection-runner-label)),
+so `docker/build-push-action` cannot run there at all.
+
+- Caller trigger: the repo's CI (`pull_request`/`push`)
+- Permissions: `contents: read`
+- Checks: `Lint, build & test`, `Docker build (frontend)` and `gate` (green only when both of the above are, so branch protection can require one name regardless of stack)
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner label for `lint-build-test` only |
+| `node-version` | string | `"20.x"` | Node version for `lint-build-test` |
+| `context` | string | `'.'` | Docker build context for `docker-build` |
+| `dockerfile` | string | `''` | Dockerfile path from the repo root, for `docker-build`. Empty uses `<context>/Dockerfile` |
+| `timeout-minutes-test` | number | `15` | Time limit of `lint-build-test` |
+| `timeout-minutes-docker` | number | `15` | Time limit of `docker-build` |
+
+```yaml
+jobs:
+  ci:
+    uses: lumina-w/agents/.github/workflows/shared-ci-vite-react.yml@v4
+    with:
+      runner-label: '["self-hosted", "build", "lumina-w"]'
+```
 
 ### `shared-claude-code-review.yml`
 
@@ -562,6 +605,43 @@ blocking by default) and `bandit` (SAST, informational by default).
 | `bandit-blocking` | boolean | `false` | `true` fails the check on bandit findings |
 | `timeout-minutes` | number | `15` | Time limit of each job |
 
+### `shared-ci-django.yml`
+
+Origin: the `lint-and-test` and `docker-build` jobs of `ci.yml`
+(terracore-back). Two jobs: `lint-and-test` (ruff, black, Django checks,
+pytest, against a throwaway PostgreSQL) and `docker-build` (`docker compose
+build`, no push).
+
+`lint-and-test` replaces the `services: postgres` container with
+`./.github/actions/start-postgres`: service containers need a Docker daemon,
+which the organization's ephemeral self-hosted runners do not have, so this
+job can run on `runner-label` as well as on `ubuntu-latest`, with the same
+database version and throwaway credentials as before. `docker-build` always
+runs on `ubuntu-latest`: `docker compose build` itself needs a Docker
+daemon, so it is never parameterized to `runner-label`.
+
+ruff and black run from the repo root, where `pyproject.toml` lives, not
+from `working-directory`. black is unpinned by default, matching
+terracore-back today (the repo pins ruff but not black yet); set
+`black-version` to pin it.
+
+- Caller trigger: the repo's CI (`pull_request`)
+- Permissions: `contents: read` (both jobs)
+- Checks: `Lint & test (pytest)`, `Docker build (backend)` and `gate` (green only when both of the above are, so branch protection can require one name regardless of stack)
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner for `lint-and-test`. `docker-build` always runs on `ubuntu-latest` |
+| `python-version` | string | `'3.14'` | Python version |
+| `requirements-file` | string | `'backend/requirements/base.txt'` | Requirements file installed and cached, relative to the repo root |
+| `working-directory` | string | `'backend'` | Django project directory (`manage.py`, `requirements/`), relative to the repo root |
+| `ruff-version` | string | `'0.16.0'` | ruff version |
+| `black-version` | string | `''` | Empty installs the latest black, unpinned (today's terracore-back behavior) |
+| `compose-file` | string | `'docker-compose.prod.yml'` | Compose file built by `docker-build`, relative to `working-directory` |
+| `compose-services` | string | `'web nginx'` | Space-separated services passed to `docker compose build` |
+| `timeout-minutes-test` | number | `20` | Time limit of `lint-and-test` |
+| `timeout-minutes-docker` | number | `15` | Time limit of `docker-build` |
+
 ### `shared-gitleaks.yml`
 
 Origin: the `gitleaks` job of the `ci.yml` of terracore-back and
@@ -628,6 +708,49 @@ jobs:
       BUILD_ARGS: |
         API_URL=${{ secrets.API_URL }}
 ```
+
+### `shared-ci-astro.yml`
+
+Origin: the `quality`, `build` and `e2e` jobs of terracore-page's `ci.yml`.
+Three jobs for an Astro/pnpm repo: `quality` (Prettier, ESLint, `astro check`,
+Vitest with coverage), `build` (needs `quality`, warns instead of failing when
+`dist/` exceeds `dist-size-warning-mb`) and `e2e` (needs `quality`, installs
+only the Chromium browser, no `--with-deps`, since the runner image already
+ships Chrome's system libraries and a job cannot `apt-get`). `ci.yml`'s two
+other jobs are not part of this workflow: secret scanning is unified on
+`shared-gitleaks.yml`, and the dependency audit already has its own
+`shared-security-audit-node.yml`.
+
+- Caller trigger: `pull_request` to `main`, `stg`, `dev`
+- Permissions: `contents: read` per job
+- Checks: `Format & Lint`, `Build`, `E2E (Playwright)` and `gate` (green only when all of the above are, so branch protection can require one name regardless of stack)
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner label |
+| `node-version-file` | string | `'.nvmrc'` | Version file passed to `actions/setup-node` |
+| `dist-size-warning-mb` | number | `50` | `build` logs a `::warning::` (does not fail) when `dist/` exceeds this size, in MB |
+| `timeout-minutes-quality` | number | `15` | Time limit of the `quality` job |
+| `timeout-minutes-build` | number | `15` | Time limit of the `build` job |
+| `timeout-minutes-e2e` | number | `20` | Time limit of the `e2e` job |
+
+### `shared-lighthouse.yml`
+
+Origin: terracore-page's `lighthouse.yml`. Builds the site and audits it with
+Lighthouse CI (`treosh/lighthouse-ci-action`, axe-core under the hood for the
+accessibility checks), uploading the report to Lighthouse CI's temporary
+public storage.
+
+- Caller trigger: `push` to `main`/`dev` and `pull_request` to `main`/`stg`/`dev`
+- Permissions: `contents: read`
+- Check: `Lighthouse CI`
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `runner-label` | string | `''` | Runner label |
+| `node-version-file` | string | `'.nvmrc'` | Version file passed to `actions/setup-node` |
+| `config-path` | string | `'./lighthouserc.json'` | Lighthouse CI config, relative to the repo root |
+| `timeout-minutes` | number | `15` | Job time limit |
 <!-- shared-workflows:end -->
 
 ## Actions
@@ -663,20 +786,23 @@ steps:
 `@lumina-w/dev-standards` is the source of truth for the commit rules and the
 branch chain; this repo runs checks in CI.
 
-- **Today.** `shared-commitlint.yml` and `shared-pr-title.yml` lint against
-  the caller repo's own `.commitlintrc.json`. With
-  `install-dependencies: true` they first run `npm ci` in the caller repo,
-  loading `DEV_STANDARDS_DEPLOY_KEY` with `webfactory/ssh-agent`, so a config
-  that extends `@lumina-w/dev-standards/commitlint` resolves. The caller
-  still has to carry a `package.json`, a lockfile and the deploy key. Only
-  terracore-back does this. The other seven repos lint against a local copy
-  of the rules as they were in dev-standards 0.1.0: no `billing` scope, and
-  the ` (#<number>)` a squash merge appends counts toward the 72 characters
+- **Two ways to resolve `extends: ["@lumina-w/dev-standards/commitlint"]`.**
+  `install-dependencies: true` runs `npm ci` in the caller repo, loading
+  `DEV_STANDARDS_DEPLOY_KEY` with `webfactory/ssh-agent`, so the config
+  resolves from the repo's own `node_modules`. The caller has to carry a
+  `package.json`, a lockfile and the deploy key, and every job in that repo
+  that runs `npm ci` now needs the key too, whether it touches commit rules
+  or not; only terracore-back does this, since it already has a `package.json`
+  for no other reason. `dev-standards-ref: vX.Y.Z` instead clones
+  `dev-standards` at that tag straight into the scratch install (the same
+  isolated temp dir the default path already uses for `@commitlint/cli`),
+  with the same deploy key, so the caller needs only the one-line
+  `.commitlintrc.json` and never touches its own `package.json` or its other
+  jobs' `npm ci`/`pnpm install`. Prefer this for a new consumer.
+  The remaining repos without either input lint against a local copy of the
+  rules as they were in dev-standards 0.1.0: no `billing` scope, and the
+  ` (#<number>)` a squash merge appends counts toward the 72 characters
   (0.2.0 stops counting it).
-- **Pending design, not implemented.** The two workflows would install
-  dev-standards themselves with the deploy key, so a consumer would need only
-  the one-line `.commitlintrc.json` and the install logic would live here once.
-  No workflow does this yet.
 - `shared-validate-pr-base.yml` is the server-side counterpart of the
   dev-standards push chain: it checks the PR direction `dev -> stg -> main`.
 
