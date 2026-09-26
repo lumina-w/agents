@@ -491,7 +491,7 @@ so `docker/build-push-action` cannot run there at all.
 
 - Caller trigger: the repo's CI (`pull_request`/`push`)
 - Permissions: `contents: read`
-- Checks: `Lint, build & test` and `Docker build (frontend)`
+- Checks: `Lint, build & test`, `Docker build (frontend)` and `gate` (green only when both of the above are, so branch protection can require one name regardless of stack)
 
 | Input | Type | Default | Use |
 |---|---|---|---|
@@ -625,7 +625,7 @@ terracore-back today (the repo pins ruff but not black yet); set
 
 - Caller trigger: the repo's CI (`pull_request`)
 - Permissions: `contents: read` (both jobs)
-- Checks: `Lint & test (pytest)` and `Docker build (backend)`
+- Checks: `Lint & test (pytest)`, `Docker build (backend)` and `gate` (green only when both of the above are, so branch protection can require one name regardless of stack)
 
 | Input | Type | Default | Use |
 |---|---|---|---|
@@ -721,7 +721,7 @@ other jobs are not part of this workflow: secret scanning is unified on
 
 - Caller trigger: `pull_request` to `main`, `stg`, `dev`
 - Permissions: `contents: read` per job
-- Checks: `Format & Lint`, `Build`, `E2E (Playwright)`
+- Checks: `Format & Lint`, `Build`, `E2E (Playwright)` and `gate` (green only when all of the above are, so branch protection can require one name regardless of stack)
 
 | Input | Type | Default | Use |
 |---|---|---|---|
