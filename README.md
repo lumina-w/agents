@@ -344,6 +344,12 @@ required; a branch with none wired up yet is left untouched, matching
 `flow.json`'s own `required_checks_note`. `dev`, `stg` and `main` can be at
 different points of the migration, so each branch is checked on its own.
 
+Add, never replace: before writing `required_status_checks`, it reads the
+branch's current protection and keeps any check already required there that
+`flow.json` does not know about yet (a repo's own native CI, before it
+migrates to a `shared-ci-*.yml`). It never drops a check someone else is
+relying on.
+
 `required_approving_review_count: 0` (every branch, today) is read as "do
 not send `required_pull_request_reviews` at all", since the classic branch
 protection endpoint may reject `0` there. `enforce_admins` is not in
