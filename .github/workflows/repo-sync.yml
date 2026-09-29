@@ -255,6 +255,13 @@ jobs:
               for r in rows:
                   f.write(f"| {r['repo']} | {r['branch']} | {r['action']} | {r['detail']} |\n")
 
+          # Also to the job log (the step summary has no REST endpoint, only
+          # the run's own page), so a run's outcome can be read without a
+          # browser.
+          print(f"\nrepo-sync ({'dry run, nothing changed' if DRY_RUN else 'applied'})")
+          for r in rows:
+              print(f"{r['repo']} | {r['branch']} | {r['action']} | {r['detail']}")
+
           if errors:
               print("Errors:\n" + "\n".join(errors), file=sys.stderr)
               sys.exit(1)
