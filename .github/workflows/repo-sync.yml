@@ -16,6 +16,12 @@
 # at different points in the migration, so this checks each branch on its
 # own, not the repo as a whole.
 #
+# Add, never replace. Before writing required_status_checks, this reads the
+# branch's current protection and keeps any check already required there
+# that flow.json does not know about yet (a repo's own native CI, before it
+# migrates to a shared-ci-*.yml). It only adds the required_checks it
+# matched; it never drops a check someone else is relying on.
+#
 # dry_run defaults to true. A dry run never calls a write API: it only
 # prints, per repo and branch, the exact protection payload it would send,
 # or why a branch was skipped. Review that output before a real run, and
@@ -202,10 +208,23 @@ jobs:
                       })
                       continue
 
+                  # Never drop a check this repo already requires that flow.json
+                  # does not know about yet (a repo's own native CI, before it
+                  # migrates to a shared-ci-*.yml). Add to what is there, do
+                  # not replace it.
+                  try:
+                      current = gh_api(f"repos/{ORG}/{repo}/branches/{branch}/protection", ok404=True)
+                  except RuntimeError as e:
+                      errors.append(f"{repo}@{branch}: read current protection: {e}")
+                      rows.append({"repo": repo, "branch": branch, "action": f"error: {e}", "detail": ""})
+                      continue
+                  existing_checks = ((current or {}).get("required_status_checks") or {}).get("checks") or []
+                  kept = [c for c in existing_checks if c.get("context") not in matched]
+
                   payload = {
                       "required_status_checks": {
                           "strict": cfg["require_branch_up_to_date"],
-                          "checks": [{"context": c} for c in matched],
+                          "checks": kept + [{"context": c} for c in matched],
                       },
                       "enforce_admins": False,
                       "required_pull_request_reviews": (
@@ -224,6 +243,8 @@ jobs:
                           errors.append(f"{repo}@{branch}: protection: {e}")
                           action = f"error: {e}"
                   detail = f"checks: {', '.join(matched)}"
+                  if kept:
+                      detail += f" | kept (not from flow.json): {', '.join(c.get('context', '?') for c in kept)}"
                   if missing:
                       detail += f" | not found yet: {', '.join(missing)}"
                   rows.append({"repo": repo, "branch": branch, "action": action, "detail": detail})
