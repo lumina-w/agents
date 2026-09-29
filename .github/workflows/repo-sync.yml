@@ -8,13 +8,27 @@
 # Detection, not assumption. For each repo and branch this reads that
 # branch's own .github/workflows/*.yml and checks which shared workflows
 # (shared-ci-*.yml, shared-gitleaks.yml, shared-commitlint.yml,
-# shared-pr-title.yml, shared-validate-pr-base.yml) it actually calls. Only
-# the required_checks whose shared workflow is wired up there are set as
-# required; a branch with none wired up is left untouched, per flow.json's
-# required_checks_note ("skips a branch whose checks it cannot find ...
-# rather than leaving it permanently unmergeable"). dev, stg and main can be
-# at different points in the migration, so this checks each branch on its
-# own, not the repo as a whole.
+# shared-pr-title.yml, shared-validate-pr-base.yml, shared-security-audit-*.yml,
+# shared-codeql.yml) it actually calls. Only the required_checks whose shared
+# workflow is wired up there are set as required; a branch with none wired up
+# is left untouched, per flow.json's required_checks_note ("skips what it
+# cannot find ... rather than leaving it permanently unmergeable"). dev, stg
+# and main can be at different points in the migration, so this checks each
+# branch on its own, not the repo as a whole.
+#
+# required_checks is per branch (since dev-standards 0.5.0): dev's list is a
+# superset of stg's and main's. Each branch in the chain looks up its own
+# list in flow.json instead of one shared list applying everywhere.
+#
+# A marker can require more than one substring (AND, not just OR between
+# alternatives). shared-security-audit-node.yml's job name is templated
+# (${{ inputs.package-manager }}-audit, "npm-audit" or "pnpm-audit"), so
+# "audit / npm-audit" also requires the literal "package-manager: npm" in the
+# workflow text; matching on the filename alone would also true-positive a
+# pnpm caller (terracore-page, okroot-page), which reports "audit /
+# pnpm-audit", a context this required check would then wait on forever.
+# pip-audit, bandit and analyze have one fixed job name regardless of input,
+# so a filename-only marker is unambiguous for them.
 #
 # Add, never replace. Before writing required_status_checks, this reads the
 # branch's current protection and keeps any check already required there
@@ -42,7 +56,7 @@ on:
       dev_standards_ref:
         description: Tag of lumina-w/dev-standards to read rules/flow.json from
         type: string
-        default: v0.3.0
+        default: v0.5.0
       repos:
         description: Comma-separated subset of .github/repo-sync.config.yml (empty = all)
         type: string
@@ -126,19 +140,32 @@ jobs:
           targets = json.load(open(f"{RUNNER_TEMP}/target-repos.json"))
           chain = flow["chain"]
           branches_cfg = flow["branches"]
-          required_checks = flow["required_checks"]
+          required_checks_by_branch = flow["required_checks"]
           repo_settings = flow["repo_settings"]
           all_methods = {m for ms in repo_settings["allowed_merge_methods"].values() for m in ms}
 
           # Which shared workflow, if called anywhere in a branch's
           # .github/workflows/*.yml, satisfies each required check context.
+          # Each value is a tuple of alternatives (OR); each alternative is
+          # itself a tuple of substrings that must ALL be present (AND). A
+          # single-element alternative behaves like a plain filename check.
           SHARED_MARKERS = {
-              "pr-title / PR title (Conventional Commits)": ("shared-pr-title.yml",),
-              "validate-base / PR base must follow dev -> stg -> main": ("shared-validate-pr-base.yml",),
-              "commitlint / Conventional Commits": ("shared-commitlint.yml",),
-              "gitleaks / Secret scan (gitleaks)": ("shared-gitleaks.yml",),
-              "ci / gate": ("shared-ci-django.yml", "shared-ci-vite-react.yml", "shared-ci-astro.yml"),
+              "pr-title / PR title (Conventional Commits)": (("shared-pr-title.yml",),),
+              "validate-base / PR base must follow dev -> stg -> main": (("shared-validate-pr-base.yml",),),
+              "commitlint / Conventional Commits": (("shared-commitlint.yml",),),
+              "gitleaks / Secret scan (gitleaks)": (("shared-gitleaks.yml",),),
+              "ci / gate": (("shared-ci-django.yml",), ("shared-ci-vite-react.yml",), ("shared-ci-astro.yml",)),
+              "audit / pip-audit": (("shared-security-audit-python.yml",),),
+              "audit / bandit": (("shared-security-audit-python.yml",),),
+              # AND, not just filename: the job name is
+              # ${{ inputs.package-manager }}-audit, so the filename alone
+              # also matches a pnpm caller (see the header comment).
+              "audit / npm-audit": (("shared-security-audit-node.yml", "package-manager: npm"),),
+              "analyze / analyze": (("shared-codeql.yml",),),
           }
+
+          def check_matches(check, text):
+              return any(all(s in text for s in alt) for alt in SHARED_MARKERS[check])
 
           def gh_api(path, method=None, input_json=None, ok404=False):
               cmd = ["gh", "api", path]
@@ -189,6 +216,7 @@ jobs:
 
               for branch in chain:
                   cfg = branches_cfg[branch]
+                  required_checks = required_checks_by_branch[branch]
                   try:
                       text = workflow_text(repo, branch)
                   except RuntimeError as e:
@@ -198,7 +226,7 @@ jobs:
 
                   matched, missing = [], []
                   for check in required_checks:
-                      (matched if any(m in text for m in SHARED_MARKERS[check]) else missing).append(check)
+                      (matched if check_matches(check, text) else missing).append(check)
 
                   if not matched:
                       rows.append({
