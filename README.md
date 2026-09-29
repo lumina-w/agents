@@ -338,11 +338,14 @@ review count, deletion/force-push) and its repo-level merge settings
 Detection, not assumption: for each repo and branch it reads that branch's
 own `.github/workflows/*.yml` and checks which shared workflows
 (`shared-ci-*.yml`, `shared-gitleaks.yml`, `shared-commitlint.yml`,
-`shared-pr-title.yml`, `shared-validate-pr-base.yml`) it actually calls. Only
+`shared-pr-title.yml`, `shared-validate-pr-base.yml`,
+`shared-security-audit-*.yml`, `shared-codeql.yml`) it actually calls. Only
 the required checks whose shared workflow is wired up there are set as
 required; a branch with none wired up yet is left untouched, matching
 `flow.json`'s own `required_checks_note`. `dev`, `stg` and `main` can be at
-different points of the migration, so each branch is checked on its own.
+different points of the migration, so each branch is checked on its own, and
+each looks up its own required-checks list (`dev`'s is a superset of `stg`'s
+and `main`'s, since `dev-standards` 0.5.0).
 
 Add, never replace: before writing `required_status_checks`, it reads the
 branch's current protection and keeps any check already required there that
@@ -355,7 +358,7 @@ not send `required_pull_request_reviews` at all", since the classic branch
 protection endpoint may reject `0` there. `enforce_admins` is not in
 `flow.json`; this always sends `false`.
 
-Inputs: `dev_standards_ref` (`v0.3.0`), `repos` (comma-separated subset of the
+Inputs: `dev_standards_ref` (`v0.5.0`), `repos` (comma-separated subset of the
 config, `''` for all), `dry_run` (`true`). A dry run never calls a write API:
 it only prints, per repo and branch, the exact protection payload it would
 send, or why a branch was skipped, to the run summary. Review that output
