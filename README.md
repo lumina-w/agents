@@ -347,11 +347,14 @@ different points of the migration, so each branch is checked on its own, and
 each looks up its own required-checks list (`dev`'s is a superset of `stg`'s
 and `main`'s, since `dev-standards` 0.5.0).
 
-Add, never replace: before writing `required_status_checks`, it reads the
-branch's current protection and keeps any check already required there that
-`flow.json` does not know about yet (a repo's own native CI, before it
-migrates to a `shared-ci-*.yml`). It never drops a check someone else is
-relying on.
+Before writing `required_status_checks`, it reads the branch's current
+protection. A check already required there is kept only if `flow.json` has
+never heard of it (a repo's own native CI, before it migrates to a
+`shared-ci-*.yml`); a check `flow.json` does manage, but that this branch's
+current list no longer requires, is dropped, since `flow.json` is the single
+source for every context it can produce. This is what actually removes
+`pr-title`, `commitlint` and `gitleaks` from `stg` and `main`'s required
+checks once a repo has run this against `dev-standards` 0.5.0 or later.
 
 `required_approving_review_count: 0` (every branch, today) is read as "do
 not send `required_pull_request_reviews` at all", since the classic branch
