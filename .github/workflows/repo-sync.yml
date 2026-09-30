@@ -30,11 +30,17 @@
 # pip-audit, bandit and analyze have one fixed job name regardless of input,
 # so a filename-only marker is unambiguous for them.
 #
-# Add, never replace. Before writing required_status_checks, this reads the
-# branch's current protection and keeps any check already required there
-# that flow.json does not know about yet (a repo's own native CI, before it
-# migrates to a shared-ci-*.yml). It only adds the required_checks it
-# matched; it never drops a check someone else is relying on.
+# Add, never replace a check flow.json has never heard of. Before writing
+# required_status_checks, this reads the branch's current protection and
+# keeps any check already required there whose name is not one of the
+# check contexts flow.json can ever produce (SHARED_MARKERS' keys): a
+# repo's own native CI, before it migrates to a shared-ci-*.yml. A check
+# that IS one of those contexts, but is not in THIS branch's list in the
+# fetched flow.json, is dropped instead of kept: flow.json is the single
+# source for every check it manages, so a branch it stops requiring a
+# check for (stg and main no longer require pr-title, commitlint or
+# gitleaks, since dev-standards 0.5.0) actually loses it here, rather than
+# it lingering forever as "kept" from before that change.
 #
 # dry_run defaults to true. A dry run never calls a write API: it only
 # prints, per repo and branch, the exact protection payload it would send,
@@ -236,10 +242,13 @@ jobs:
                       })
                       continue
 
-                  # Never drop a check this repo already requires that flow.json
-                  # does not know about yet (a repo's own native CI, before it
-                  # migrates to a shared-ci-*.yml). Add to what is there, do
-                  # not replace it.
+                  # Keep a check this repo already requires only if flow.json
+                  # has never heard of it (a repo's own native CI, before it
+                  # migrates to a shared-ci-*.yml). A check flow.json DOES
+                  # manage, but that is not in this branch's list, is dropped:
+                  # flow.json is the single source for every context it can
+                  # produce, so a branch that stops requiring a managed check
+                  # actually loses it, instead of it lingering as "kept".
                   try:
                       current = gh_api(f"repos/{ORG}/{repo}/branches/{branch}/protection", ok404=True)
                   except RuntimeError as e:
@@ -247,7 +256,7 @@ jobs:
                       rows.append({"repo": repo, "branch": branch, "action": f"error: {e}", "detail": ""})
                       continue
                   existing_checks = ((current or {}).get("required_status_checks") or {}).get("checks") or []
-                  kept = [c for c in existing_checks if c.get("context") not in matched]
+                  kept = [c for c in existing_checks if c.get("context") not in SHARED_MARKERS]
 
                   payload = {
                       "required_status_checks": {
@@ -270,7 +279,10 @@ jobs:
                       except RuntimeError as e:
                           errors.append(f"{repo}@{branch}: protection: {e}")
                           action = f"error: {e}"
+                  dropped = [c.get("context", "?") for c in existing_checks if c.get("context") in SHARED_MARKERS and c.get("context") not in matched]
                   detail = f"checks: {', '.join(matched)}"
+                  if dropped:
+                      detail += f" | dropped (flow.json no longer requires on this branch): {', '.join(dropped)}"
                   if kept:
                       detail += f" | kept (not from flow.json): {', '.join(c.get('context', '?') for c in kept)}"
                   if missing:
