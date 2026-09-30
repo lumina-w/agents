@@ -361,7 +361,7 @@ not send `required_pull_request_reviews` at all", since the classic branch
 protection endpoint may reject `0` there. `enforce_admins` is not in
 `flow.json`; this always sends `false`.
 
-Inputs: `dev_standards_ref` (`v0.5.0`), `repos` (comma-separated subset of the
+Inputs: `dev_standards_ref` (`v0.6.0`), `repos` (comma-separated subset of the
 config, `''` for all), `dry_run` (`true`). A dry run never calls a write API:
 it only prints, per repo and branch, the exact protection payload it would
 send, or why a branch was skipped, to the run summary. Review that output

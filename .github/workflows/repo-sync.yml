@@ -24,9 +24,12 @@
 # alternatives). shared-security-audit-node.yml's job name is templated
 # (${{ inputs.package-manager }}-audit, "npm-audit" or "pnpm-audit"), so
 # "audit / npm-audit" also requires the literal "package-manager: npm" in the
-# workflow text; matching on the filename alone would also true-positive a
-# pnpm caller (terracore-page, okroot-page), which reports "audit /
-# pnpm-audit", a context this required check would then wait on forever.
+# workflow text, and "audit / pnpm-audit" (since dev-standards 0.6.0)
+# requires "package-manager: pnpm"; matching on the filename alone would
+# true-positive both contexts for every caller regardless of which package
+# manager it actually passes. Of the Node repos this manages, only
+# terracore-page is a pnpm caller today (okroot-page and terracore-front are
+# npm); verify against the repo's own workflow before assuming either way.
 # pip-audit, bandit and analyze have one fixed job name regardless of input,
 # so a filename-only marker is unambiguous for them.
 #
@@ -62,7 +65,7 @@ on:
       dev_standards_ref:
         description: Tag of lumina-w/dev-standards to read rules/flow.json from
         type: string
-        default: v0.5.0
+        default: v0.6.0
       repos:
         description: Comma-separated subset of .github/repo-sync.config.yml (empty = all)
         type: string
@@ -165,8 +168,10 @@ jobs:
               "audit / bandit": (("shared-security-audit-python.yml",),),
               # AND, not just filename: the job name is
               # ${{ inputs.package-manager }}-audit, so the filename alone
-              # also matches a pnpm caller (see the header comment).
+              # also matches the other package manager's caller (see the
+              # header comment).
               "audit / npm-audit": (("shared-security-audit-node.yml", "package-manager: npm"),),
+              "audit / pnpm-audit": (("shared-security-audit-node.yml", "package-manager: pnpm"),),
               "analyze / analyze": (("shared-codeql.yml",),),
           }
 
