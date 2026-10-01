@@ -30,8 +30,15 @@
 # manager it actually passes. Of the Node repos this manages, only
 # terracore-page is a pnpm caller today (okroot-page and terracore-front are
 # npm); verify against the repo's own workflow before assuming either way.
-# pip-audit, bandit and analyze have one fixed job name regardless of input,
-# so a filename-only marker is unambiguous for them.
+# pip-audit and bandit have one fixed job name regardless of input, so a
+# filename-only marker is unambiguous for them. "analyze / analyze" also
+# needs an AND marker: a repo can reference shared-codeql.yml from a
+# codeql.yml gated to workflow_dispatch only (no GitHub Advanced Security on
+# a private repo), where the analyze job never runs on a pull_request and a
+# required check for it would never resolve (terracore-page, see this repo's
+# README). An active, uncommented "pull_request:" trigger at the standard
+# 2-space indent under `on:` is required alongside the filename, so a
+# workflow_dispatch-only caller is correctly treated as not wired up.
 #
 # Add, never replace a check flow.json has never heard of. Before writing
 # required_status_checks, this reads the branch's current protection and
@@ -172,11 +179,20 @@ jobs:
               # header comment).
               "audit / npm-audit": (("shared-security-audit-node.yml", "package-manager: npm"),),
               "audit / pnpm-audit": (("shared-security-audit-node.yml", "package-manager: pnpm"),),
-              "analyze / analyze": (("shared-codeql.yml",),),
+              "analyze / analyze": (("shared-codeql.yml", "\n  pull_request:"),),
           }
 
-          def check_matches(check, text):
-              return any(all(s in text for s in alt) for alt in SHARED_MARKERS[check])
+          def check_matches(check, texts):
+              # Each alternative's substrings must all appear in the SAME
+              # workflow file: checking them against the whole branch's
+              # workflows joined together would let an AND marker's pieces
+              # match across unrelated files (e.g. "pull_request:" from
+              # automerge-dev.yml satisfying the analyze marker for a
+              # codeql.yml that itself never triggers on one).
+              return any(
+                  any(all(s in text for s in alt) for text in texts)
+                  for alt in SHARED_MARKERS[check]
+              )
 
           def gh_api(path, method=None, input_json=None, ok404=False):
               cmd = ["gh", "api", path]
@@ -194,10 +210,10 @@ jobs:
                   raise RuntimeError(proc.stderr.strip() or f"gh api {path} failed")
               return json.loads(proc.stdout) if proc.stdout.strip() else None
 
-          def workflow_text(repo, branch):
+          def workflow_texts(repo, branch):
               entries = gh_api(f"repos/{ORG}/{repo}/contents/.github/workflows?ref={branch}", ok404=True)
               if not entries:
-                  return ""
+                  return []
               parts = []
               for entry in entries:
                   if entry.get("type") != "file" or not entry["name"].endswith((".yml", ".yaml")):
@@ -205,7 +221,7 @@ jobs:
                   blob = gh_api(f"repos/{ORG}/{repo}/contents/{entry['path']}?ref={branch}", ok404=True)
                   if blob and blob.get("content"):
                       parts.append(base64.b64decode(blob["content"]).decode("utf-8", "replace"))
-              return "\n".join(parts)
+              return parts
 
           rows, errors = [], []
 
@@ -229,7 +245,7 @@ jobs:
                   cfg = branches_cfg[branch]
                   required_checks = required_checks_by_branch[branch]
                   try:
-                      text = workflow_text(repo, branch)
+                      texts = workflow_texts(repo, branch)
                   except RuntimeError as e:
                       errors.append(f"{repo}@{branch}: {e}")
                       rows.append({"repo": repo, "branch": branch, "action": f"error: {e}", "detail": ""})
@@ -237,7 +253,7 @@ jobs:
 
                   matched, missing = [], []
                   for check in required_checks:
-                      (matched if check_matches(check, text) else missing).append(check)
+                      (matched if check_matches(check, texts) else missing).append(check)
 
                   if not matched:
                       rows.append({
