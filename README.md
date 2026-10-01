@@ -347,6 +347,14 @@ different points of the migration, so each branch is checked on its own, and
 each looks up its own required-checks list (`dev`'s is a superset of `stg`'s
 and `main`'s, since `dev-standards` 0.5.0).
 
+Referencing a shared workflow is not enough for `analyze / analyze`: a caller
+can gate its `codeql.yml` to `workflow_dispatch` only (no GitHub Advanced
+Security on a private repo, see `shared-codeql.yml` below), where the
+`analyze` job never runs on a pull request. Requiring that check there would
+leave it permanently unresolved. So that marker also requires an active,
+uncommented `pull_request:` trigger in the workflow text; a
+`workflow_dispatch`-only caller like terracore-page's is correctly left out.
+
 Before writing `required_status_checks`, it reads the branch's current
 protection. A check already required there is kept only if `flow.json` has
 never heard of it (a repo's own native CI, before it migrates to a

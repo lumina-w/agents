@@ -30,8 +30,15 @@
 # manager it actually passes. Of the Node repos this manages, only
 # terracore-page is a pnpm caller today (okroot-page and terracore-front are
 # npm); verify against the repo's own workflow before assuming either way.
-# pip-audit, bandit and analyze have one fixed job name regardless of input,
-# so a filename-only marker is unambiguous for them.
+# pip-audit and bandit have one fixed job name regardless of input, so a
+# filename-only marker is unambiguous for them. "analyze / analyze" also
+# needs an AND marker: a repo can reference shared-codeql.yml from a
+# codeql.yml gated to workflow_dispatch only (no GitHub Advanced Security on
+# a private repo), where the analyze job never runs on a pull_request and a
+# required check for it would never resolve (terracore-page, see this repo's
+# README). An active, uncommented "pull_request:" trigger at the standard
+# 2-space indent under `on:` is required alongside the filename, so a
+# workflow_dispatch-only caller is correctly treated as not wired up.
 #
 # Add, never replace a check flow.json has never heard of. Before writing
 # required_status_checks, this reads the branch's current protection and
@@ -172,7 +179,7 @@ jobs:
               # header comment).
               "audit / npm-audit": (("shared-security-audit-node.yml", "package-manager: npm"),),
               "audit / pnpm-audit": (("shared-security-audit-node.yml", "package-manager: pnpm"),),
-              "analyze / analyze": (("shared-codeql.yml",),),
+              "analyze / analyze": (("shared-codeql.yml", "\n  pull_request:"),),
           }
 
           def check_matches(check, text):
