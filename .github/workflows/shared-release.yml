@@ -1,0 +1,190 @@
+# Reusable workflow: create the tag and the GitHub release of one version.
+# Implements the release standard of lumina-w/dev-standards
+# (docs/release-standard.md).
+#
+# It checks the version, the version file and the changelog section on the
+# release branch, then creates the tag `v<version>` on that branch's head and
+# the GitHub release in one call, with the changelog section as the notes.
+# Nothing is created unless every check passes. Callers trigger it with
+# `workflow_dispatch` and a `version` input, from the repo's default branch.
+
+name: Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Semantic version without the v prefix, e.g. 1.4.2 or 1.5.0-rc.1'
+        type: string
+        required: true
+      prerelease:
+        description: 'Publish as a pre-release. Required when the version has a suffix, and only then.'
+        type: boolean
+        default: false
+      dry-run:
+        description: 'Run every check and report what would be created, without creating anything.'
+        type: boolean
+        default: false
+      changelog-path:
+        description: 'Changelog file, relative to the repo root.'
+        type: string
+        default: CHANGELOG.md
+      version-file:
+        description: 'JSON file whose "version" field must equal the version. Empty skips the check.'
+        type: string
+        default: package.json
+      release-branch:
+        description: 'Branch the tag is created on. The checks run on its head.'
+        type: string
+        default: main
+      runner-label:
+        type: string
+        default: ''
+    outputs:
+      tag:
+        description: 'The created tag, e.g. v1.4.2. Empty on a dry run.'
+        value: ${{ jobs.release.outputs.tag }}
+      url:
+        description: 'URL of the created release. Empty on a dry run.'
+        value: ${{ jobs.release.outputs.url }}
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ${{ startsWith(inputs.runner-label, '[') && fromJSON(inputs.runner-label) || inputs.runner-label || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      url: ${{ steps.release.outputs.url }}
+    steps:
+      - name: Check out the release branch
+        id: checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release-branch }}
+          persist-credentials: false
+
+      - name: Check and create the release
+        id: release
+        uses: actions/github-script@v8
+        env:
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          RELEASE_BRANCH: ${{ inputs.release-branch }}
+          RELEASE_SHA: ${{ steps.checkout.outputs.commit }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { owner, repo } = context.repo;
+            const env = process.env;
+            const version = env.VERSION;
+            const tag = `v${version}`;
+            const prerelease = env.PRERELEASE === 'true';
+            const dryRun = env.DRY_RUN === 'true';
+
+            const fail = (message) => {
+              core.setFailed(message);
+              return false;
+            };
+
+            // Paths come from the caller; keep them inside the workspace.
+            const root = path.resolve(env.GITHUB_WORKSPACE);
+            const inRepo = (relative) => {
+              const full = path.resolve(root, relative);
+              return full.startsWith(root + path.sep) ? full : null;
+            };
+
+            const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
+            if (!semver.test(version)) {
+              return fail(`'${version}' is not a valid semantic version. Use MAJOR.MINOR.PATCH without the v prefix, e.g. 1.4.2 or 1.5.0-rc.1.`);
+            }
+            const hasSuffix = version.includes('-');
+            if (hasSuffix !== prerelease) {
+              return fail(hasSuffix
+                ? `'${version}' has a pre-release suffix, so the prerelease input must be true.`
+                : `'${version}' has no pre-release suffix, so the prerelease input must be false.`);
+            }
+
+            // The tag must not exist yet: tags are immutable.
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+              return fail(`The tag ${tag} already exists. Tags are never moved or deleted: release a new version instead.`);
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            try {
+              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              return fail(`A release for ${tag} already exists.`);
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            // The version file, when set, must carry the same version.
+            if (env.VERSION_FILE) {
+              const file = inRepo(env.VERSION_FILE);
+              if (!file || !fs.existsSync(file)) {
+                return fail(`Version file '${env.VERSION_FILE}' was not found on ${env.RELEASE_BRANCH}.`);
+              }
+              const fileVersion = JSON.parse(fs.readFileSync(file, 'utf8')).version;
+              if (fileVersion !== version) {
+                return fail(`${env.VERSION_FILE} says '${fileVersion}' on ${env.RELEASE_BRANCH}, but the release is '${version}'. Update it in the release PR and promote it first.`);
+              }
+            }
+
+            // The notes are the changelog section of this version, unchanged.
+            const changelog = inRepo(env.CHANGELOG_PATH);
+            if (!changelog || !fs.existsSync(changelog)) {
+              return fail(`Changelog '${env.CHANGELOG_PATH}' was not found on ${env.RELEASE_BRANCH}.`);
+            }
+            const lines = fs.readFileSync(changelog, 'utf8').split(/\r?\n/);
+            const heading = `## [${version}]`;
+            const start = lines.findIndex((line) => line.startsWith(heading));
+            if (start === -1) {
+              return fail(`${env.CHANGELOG_PATH} has no '${heading}' section on ${env.RELEASE_BRANCH}. Turn the unreleased section into it in the release PR and promote it first.`);
+            }
+            let end = lines.findIndex((line, index) => index > start && line.startsWith('## ['));
+            if (end === -1) end = lines.length;
+            const notes = lines.slice(start + 1, end).join('\n').trim();
+            if (!notes) {
+              return fail(`The '${heading}' section of ${env.CHANGELOG_PATH} is empty.`);
+            }
+
+            core.summary
+              .addHeading(dryRun ? `Dry run: ${tag}` : `Release ${tag}`, 2)
+              .addRaw(`Branch \`${env.RELEASE_BRANCH}\` at \`${env.RELEASE_SHA}\`${prerelease ? ', pre-release' : ''}.`, true)
+              .addHeading('Notes', 3)
+              .addCodeBlock(notes, 'markdown');
+
+            if (dryRun) {
+              core.info(`Dry run: every check passed. ${tag} would be created on ${env.RELEASE_SHA}. Nothing was created.`);
+              await core.summary.write();
+              return;
+            }
+
+            const { data: release } = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: env.RELEASE_SHA,
+              name: tag,
+              body: notes,
+              draft: false,
+              prerelease,
+              make_latest: prerelease ? 'false' : 'true',
+            });
+            core.setOutput('tag', tag);
+            core.setOutput('url', release.html_url);
+            core.info(`Created ${tag}: ${release.html_url}`);
+            await core.summary.addLink('Open the release', release.html_url).write();

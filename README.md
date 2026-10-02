@@ -43,6 +43,7 @@ the personal Claude Code configuration belongs to `wavival-coding-config`.
 | `shared-cd-docker-publish.yml` | Builds a Docker image, scans it with Trivy, pushes it to GHCR and optionally sends a `repository_dispatch`. | In use by 2 repos |
 | `shared-ci-astro.yml` | Astro/pnpm CI: format/lint/typecheck/unit tests, build with a dist size warning, Playwright E2E. | New, not yet called by any repo |
 | `shared-lighthouse.yml` | Lighthouse CI (performance, accessibility, SEO) for pnpm projects. | New, not yet called by any repo |
+| `shared-release.yml` | Creates the tag and the GitHub release of one version, after checking the version, the version file and the changelog section. Implements the release standard of dev-standards. | New, not yet called by any repo |
 
 | Action | Purpose | Status |
 |---|---|---|
@@ -74,6 +75,7 @@ is the default branch of all product repos, so scheduled callers run from it.
 | `shared-gitleaks.yml` | terracore-back (`ci.yml`), terracore-front (`ci.yml`, on the self-hosted runner `["self-hosted", "build", "terracore-front"]`) |
 | `shared-cd-docker-publish.yml` | okroot-back (`cd-staging.yml`, `cd-production.yml`), okroot-front (`docker-build-push.yml`) |
 | `docs-sync.yml` | terracore-docs, okroot-docs, luminaw-docs (`docs-daily-sync.yml`, `0 11 * * *`, 06:00 in Bogotá) |
+| `shared-release.yml` | none yet (`release.yml`, `workflow_dispatch`; blog-w is the first to adopt it) |
 
 Exceptions to `@v4` and to `ubuntu-latest` in the table above:
 
@@ -182,6 +184,7 @@ only the tools the runner image ships.
 | | `DISPATCH_TOKEN` | no (yes when dispatching to another repo) | Token for the `repository_dispatch` |
 | `shared-ci-astro.yml` | none | | |
 | `shared-lighthouse.yml` | none | | |
+| `shared-release.yml` | none | | Uses the workflow token (`contents: write`) to create the tag and the release |
 | `repo-sync.yml` | `BRANCH_PROTECTION_TOKEN` | yes | Reads and writes branch protection and repo settings on every managed repo, and reads `rules/flow.json` from dev-standards |
 
 `CLAUDE_CODE_OAUTH_TOKEN`, `DOCS_SOURCES_READ_TOKEN` and `PROMOTE_TOKEN` are
@@ -425,7 +428,7 @@ Third-party actions are pinned: `actions/checkout@v7`,
 `webfactory/ssh-agent@v0.10.0`,
 `gitleaks/gitleaks-action@v3`, `anthropics/claude-code-action@v1`,
 `peter-evans/repository-dispatch@v4`, `treosh/lighthouse-ci-action@v12`,
-`actions/upload-artifact@v7` and `aquasecurity/trivy-action` by commit SHA
+`actions/upload-artifact@v7`, `actions/github-script@v8` and `aquasecurity/trivy-action` by commit SHA
 (v0.36.0).
 
 ### `shared-commitlint.yml`
@@ -808,6 +811,68 @@ public storage.
 | `node-version-file` | string | `'.nvmrc'` | Version file passed to `actions/setup-node` |
 | `config-path` | string | `'./lighthouserc.json'` | Lighthouse CI config, relative to the repo root |
 | `timeout-minutes` | number | `15` | Job time limit |
+
+### `shared-release.yml`
+
+Implements the release standard of dev-standards
+([`docs/release-standard.md`](https://github.com/lumina-w/dev-standards/blob/main/docs/release-standard.md)).
+Checks out the release branch, runs every check and only then creates the tag
+`v<version>` on the branch head and the GitHub release in one call, with the
+changelog section of that version as the notes. If a check fails, nothing is
+created. The checks: the version is valid semantic versioning without the `v`,
+the `prerelease` input matches the version suffix, the tag and a release for it
+do not exist yet, the version file (when set) carries the same version, and the
+changelog has a non-empty `## [<version>]` section.
+
+- Caller trigger: `workflow_dispatch` with a `version` input (and optional
+  `prerelease` and `dry-run`), on the repo's default branch. The workflow always
+  checks out `release-branch`, so the caller does not need to reach `main` first.
+- Permissions: `contents: write` on the job only; it uses the workflow token.
+- Check: `Tag and release`
+- Outputs: `tag` and `url` of the created release (empty on a dry run).
+- It does not start other workflows: a release created with the workflow token
+  triggers none.
+
+| Input | Type | Default | Use |
+|---|---|---|---|
+| `version` | string | required | Version without the `v`, e.g. `1.4.2` or `1.5.0-rc.1` |
+| `prerelease` | boolean | `false` | Must be true when the version has a suffix, and only then |
+| `dry-run` | boolean | `false` | Runs every check and reports what would be created, without creating anything |
+| `changelog-path` | string | `'CHANGELOG.md'` | Changelog, relative to the repo root |
+| `version-file` | string | `'package.json'` | JSON file whose `version` must equal the version. Empty skips the check |
+| `release-branch` | string | `'main'` | Branch the tag is created on and the checks run on |
+| `runner-label` | string | `''` | Runner label |
+
+Minimal caller (`.github/workflows/release.yml`):
+
+```yaml
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the v, e.g. 1.4.2'
+        required: true
+        type: string
+      prerelease:
+        type: boolean
+        default: false
+      dry-run:
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  release:
+    uses: lumina-w/agents/.github/workflows/shared-release.yml@v4
+    permissions:
+      contents: write
+    with:
+      version: ${{ inputs.version }}
+      prerelease: ${{ inputs.prerelease }}
+      dry-run: ${{ inputs.dry-run }}
+      changelog-path: docs/CHANGELOG.md
+      runner-label: '["self-hosted", "build", "lumina-w"]'
+```
 <!-- shared-workflows:end -->
 
 ## Actions
@@ -862,6 +927,9 @@ branch chain; this repo runs checks in CI.
   (0.2.0 stops counting it).
 - `shared-validate-pr-base.yml` is the server-side counterpart of the
   dev-standards push chain: it checks the PR direction `dev -> stg -> main`.
+- `shared-release.yml` implements `docs/release-standard.md`: the version format,
+  the changelog shape and the checks come from there; change the standard first,
+  then the workflow.
 
 ## Versioning
 
