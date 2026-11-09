@@ -881,10 +881,13 @@ jobs:
 
 Composite action for test jobs that used a `services: postgres` container,
 which needs a Docker daemon the organization's ephemeral runners do not have.
-It runs `initdb` and `pg_ctl` from `/usr/lib/postgresql/<version>/bin` (the
-lumina-w runner image and `ubuntu-latest` both ship PostgreSQL 16), with the
-cluster in `$RUNNER_TEMP`, listening on `localhost:<port>` with password
-authentication, and creates the database.
+It runs `initdb` and `pg_ctl` from `/usr/lib/postgresql/<version>/bin`, with
+the cluster in `$RUNNER_TEMP`, listening on `localhost:<port>` with password
+authentication, and creates the database. The lumina-w runner image ships
+PostgreSQL 16. `ubuntu-latest` (Ubuntu 26.04 since November 2026) does not:
+when the requested version is missing and the runner has passwordless sudo,
+the action installs it with apt, from the distribution or else from
+apt.postgresql.org. Without sudo it fails and lists the versions it found.
 
 ```yaml
 steps:
