@@ -2,8 +2,13 @@
 # used a `services: postgres` container. Service containers need a Docker
 # daemon, which the organization's ephemeral self-hosted runners do not have.
 # The cluster lives in $RUNNER_TEMP and dies with the job. It uses the
-# PostgreSQL binaries of the runner: the lumina-w runner image and
-# ubuntu-latest both ship PostgreSQL 16 under /usr/lib/postgresql/16/bin.
+# PostgreSQL binaries of the runner under /usr/lib/postgresql/<version>/bin.
+# The lumina-w runner image ships PostgreSQL 16 there. ubuntu-latest moved to
+# Ubuntu 26.04, which no longer does, so when the requested version is missing
+# and the runner allows passwordless sudo (GitHub-hosted runners do), the
+# action installs it with apt: from the distribution first, then from the
+# PostgreSQL apt repository (apt.postgresql.org). Without sudo it fails with
+# the versions it found, as before.
 
 name: Start PostgreSQL
 description: Start a throwaway PostgreSQL server on localhost for tests.
@@ -39,7 +44,29 @@ runs:
       run: |
         set -euo pipefail
         bin="/usr/lib/postgresql/$PG_VERSION/bin"
-        [ -x "$bin/initdb" ] || { echo "::error::PostgreSQL $PG_VERSION binaries not found in $bin"; exit 1; }
+        if [ ! -x "$bin/initdb" ]; then
+          if command -v apt-get >/dev/null && sudo -n true 2>/dev/null; then
+            echo "PostgreSQL $PG_VERSION not found in $bin; installing it with apt."
+            export DEBIAN_FRONTEND=noninteractive
+            sudo -n apt-get update -qq || true
+            if ! sudo -n apt-get install -y -qq --no-install-recommends "postgresql-$PG_VERSION"; then
+              echo "postgresql-$PG_VERSION is not in the distribution; adding apt.postgresql.org."
+              sudo -n apt-get install -y -qq --no-install-recommends postgresql-common || true
+              sudo -n /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y || true
+              sudo -n apt-get install -y -qq --no-install-recommends "postgresql-$PG_VERSION" || true
+            fi
+          fi
+        fi
+        if [ ! -x "$bin/initdb" ]; then
+          found="$(ls /usr/lib/postgresql 2>/dev/null | tr '\n' ' ')"
+          echo "::error::PostgreSQL $PG_VERSION binaries not found in $bin (installed: ${found:-none}) and could not be installed with apt (needs passwordless sudo, apt-get and access to the package repositories)"
+          exit 1
+        fi
+        # The apt package starts its own cluster on 5432; stop it so this
+        # throwaway cluster can take the port.
+        if command -v pg_lsclusters >/dev/null && pg_lsclusters -h 2>/dev/null | grep -q " $PG_PORT "; then
+          sudo -n pg_ctlcluster "$PG_VERSION" main stop 2>/dev/null || true
+        fi
         dir="$RUNNER_TEMP/postgres"
         mkdir -p "$dir"
         pwfile="$dir/pwfile"
