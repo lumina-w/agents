@@ -338,8 +338,16 @@ every repo listed in `.github/repo-sync.config.yml` (the 8 product repos
 and the four Kairo repos: `kairo-back`, `kairo-front`, `kairo-page`,
 `kairo-docs`),
 applies its branch protection (required checks, the up-to-date requirement,
-review count, deletion/force-push) and its repo-level merge settings
-(`delete_branch_on_merge`, the allowed merge methods).
+review count, deletion/force-push) and its repo-level settings: the default
+branch (the first branch of `flow.json`'s chain, `dev`, which scheduled
+callers and Dependabot run from), `delete_branch_on_merge` and the allowed
+merge methods.
+
+`extra_required_checks` in the same config file adds, per repo and branch, a
+repo's own jobs that `flow.json` does not list (today `kairo-back`'s
+`Types, Redis tests and coverage` and `Deploy scripts (...)` on `dev`). They
+are added to the checks of a branch that repo-sync protects, never to a
+skipped one, and a name `flow.json` manages is ignored there.
 
 Detection, not assumption: for each repo and branch it reads that branch's
 own `.github/workflows/*.yml` and checks which shared workflows

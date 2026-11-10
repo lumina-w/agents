@@ -15,3 +15,11 @@ repos:
   - kairo-front
   - kairo-page
   - kairo-docs
+# A repo's own jobs that flow.json does not list and that the owner wants
+# required too, per branch, added to the checks repo-sync sets. Names exactly
+# as GitHub shows them on a pull request. Decided by the owner on 10-11-2026.
+extra_required_checks:
+  kairo-back:
+    dev:
+      - "Types, Redis tests and coverage"
+      - "Deploy scripts (shellcheck, compose config, backup and restore tests)"
