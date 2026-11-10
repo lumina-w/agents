@@ -191,7 +191,8 @@ only the tools the runner image ships.
 organization secrets. `DOCS_SOURCES_READ_TOKEN` is a fine-grained PAT with
 Contents read-only on the code repos, `agents` and the three `*-docs` repos.
 `BRANCH_PROTECTION_TOKEN` is also an organization secret: a fine-grained PAT
-with Administration: write and Contents: read on the 8 product repos, plus
+with Administration: write and Contents: read on every repo of
+`.github/repo-sync.config.yml` (the 8 product repos and the four Kairo repos), plus
 Contents: read on `dev-standards` (to read `rules/flow.json`). Nobody has
 created it yet; `repo-sync.yml` fails its first step until it exists.
 
@@ -333,7 +334,9 @@ The one workflow here that is not `on: workflow_call`: it runs directly in
 this repo, triggered by a person through `workflow_dispatch`, and reaches
 across the organization instead of being called by a single caller. It reads
 `rules/flow.json` from `@lumina-w/dev-standards` at a pinned tag and, for
-every repo listed in `.github/repo-sync.config.yml` (the 8 product repos),
+every repo listed in `.github/repo-sync.config.yml` (the 8 product repos
+and the four Kairo repos: `kairo-back`, `kairo-front`, `kairo-page`,
+`kairo-docs`),
 applies its branch protection (required checks, the up-to-date requirement,
 review count, deletion/force-push) and its repo-level merge settings
 (`delete_branch_on_merge`, the allowed merge methods).
