@@ -340,8 +340,9 @@ and the four Kairo repos: `kairo-back`, `kairo-front`, `kairo-page`,
 applies its branch protection (required checks, the up-to-date requirement,
 review count, deletion/force-push) and its repo-level settings: the default
 branch (the first branch of `flow.json`'s chain, `dev`, which scheduled
-callers and Dependabot run from), `delete_branch_on_merge` and the allowed
-merge methods.
+callers and Dependabot run from), `delete_branch_on_merge`, the allowed
+merge methods and `allow_auto_merge` (on when a branch of `flow.json` has
+`auto_merge.enabled`, which `automerge-dev.yml` needs).
 
 `extra_required_checks` in the same config file adds, per repo and branch, a
 repo's own jobs that `flow.json` does not list (today `kairo-back`'s
